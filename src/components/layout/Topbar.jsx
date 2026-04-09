@@ -15,6 +15,7 @@ const TITLES = {
   '/tesouraria':   'Mapa de Tesouraria',
   '/obras':        'Obras',
   '/fornecedores': 'Fornecedores',
+  '/pagamentos':   'Pagamentos',
   '/clientes':     'Clientes',
   '/arquivo':      'Arquivo',
   '/rh':           'Recursos Humanos',
@@ -131,6 +132,7 @@ export default function Topbar({ agentOpen, sidebarOpen }) {
     { label: 'Mapa de Tesouraria', path: '/tesouraria', desc: 'Pagamentos, recebimentos, cashflow' },
     { label: 'Obras',            path: '/obras',         desc: 'Controlo de gestão por obra' },
     { label: 'Fornecedores',     path: '/fornecedores',  desc: 'Faturas e pagamentos a fornecedores' },
+    { label: 'Pagamentos',       path: '/pagamentos',    desc: 'Lista operacional de pagamentos a efectuar' },
     { label: 'Clientes',         path: '/clientes',      desc: 'Faturas e recebimentos de clientes' },
     { label: 'Arquivo',          path: '/arquivo',       desc: 'Histório de documentos e faturas' },
     { label: 'Recursos Humanos', path: '/rh',            desc: 'Colaboradores, férias, passagens e despesas' },
@@ -165,7 +167,7 @@ export default function Topbar({ agentOpen, sidebarOpen }) {
   const minhasNotifs = user ? getNotifsParaUser(user) : [];
   const naoLidas = user ? naoLidasParaUser(user) : 0;
   const query = normalizeText(searchVal);
-  const canSeePath = (path) => canViewPage(user, path);
+  const canSeePath = (path) => path === '/pagamentos' ? canViewPage(user, '/fornecedores') : canViewPage(user, path);
 
   const searchResults = query
     ? (() => {

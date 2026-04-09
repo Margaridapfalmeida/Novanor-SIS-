@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { FaturaDetalheModal, ClienteModal, CLIENTES_DATA, FATURA_CONFIG_CLI } from './Clientes';
-import { FaturaFornDetalheModal, FornecedorModal, FORNECEDORES_DATA, FATURA_CONFIG_FORN } from './Fornecedores';
+import { FaturaFornDetalheModal, FornecedorModal, FORNECEDORES_DATA, FATURA_CONFIG_FORN, inferFornecedorTipo, FORNECEDOR_TIPOS } from './Fornecedores';
 import { useAuth } from '../context/AuthContext';
 import { canViewModule, loadPerfis } from '../context/PermissionsConfig';
 import { withDemoSeed } from '../utils/deliveryMode';
@@ -54,6 +54,7 @@ function loadFaturasForn() {
           tipo: 'fornecedor',
           entidade: forn.nome,
           fornecedorId: forn.id,
+          fornecedorTipo: inferFornecedorTipo(forn),
           docs: [
             fat.pdf && 'fatura.pdf',
             fat.comprovativoPagamento && 'comprovativo.pdf',
@@ -179,6 +180,7 @@ function parseLooseDateParts(value) {
 function classifyFinanceKind(doc) {
   const text = `${doc.entidade || ''} ${doc.descricao || ''} ${doc.descricaoFatura || ''} ${doc.id || ''}`.toLowerCase();
   if (doc.tipo === 'cliente') return 'Clientes';
+  if (doc.tipo === 'fornecedor') return doc.fornecedorTipo === 'estrutura' ? 'Fornecedores estrutura' : 'Fornecedores materiais';
   if (/(banco|bank|bcp|millennium|cgd|caixa geral|santander|novo banco|bpi)/i.test(text)) return 'Bancos';
   if (/(caixa|cash)/i.test(text)) return 'Caixa';
   if (/(interno|interna|internas|documento interno)/i.test(text)) return 'Documentos internos';
@@ -903,7 +905,17 @@ export default function ArquivoPage() {
                       </span>
                     </td>
                     <td>{doc.obra ? <ObraLink obra={doc.obra} /> : '—'}</td>
-                    <td><span className="badge badge-n">{doc.kind}</span></td>
+                    <td>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+                        <span className="badge badge-n">{doc.kind}</span>
+                        {doc.tipo === 'fornecedor' && (
+                          <span className={`badge ${doc.fornecedorTipo === 'estrutura' ? 'badge-n' : 'badge-i'}`}>
+                            {FORNECEDOR_TIPOS[doc.fornecedorTipo]?.label || 'Fornecedor'}
+                          </span>
+                        )}
+                        {doc.encomendaId && <span className="badge badge-n">{doc.encomendaId}</span>}
+                      </div>
+                    </td>
                     <td style={{ fontWeight: 700 }}>{fmt(doc.valor || 0)}</td>
                     <td style={{ color: 'var(--text-muted)' }}>{doc.data || '—'}</td>
                     <td>
@@ -1201,7 +1213,7 @@ export default function ArquivoPage() {
           <div className="card" style={{ padding: '14px 16px', marginBottom: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
               <div style={{ fontWeight: 700 }}>Estrutura financeira</div>
-              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>Ano → Mês → Tipo documental. Tipos atuais: clientes, fornecedores, bancos, caixa e documentos internos.</div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>Ano → Mês → Tipo documental. Os fornecedores estão separados entre materiais/obras e estrutura/logística.</div>
             </div>
           </div>
           {financeDocsVisible.length > 0 ? renderDocsTable(financeDocsVisible, 'financeiro') : <div style={{ marginBottom: 22 }}>{renderFolderGrid(financeFolders)}</div>}

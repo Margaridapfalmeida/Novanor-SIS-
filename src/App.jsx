@@ -9,6 +9,7 @@ import TesourariaPage from './pages/Tesouraria.jsx';
 import ObrasPage from './pages/Obras.jsx';
 import ObraDetalhe from './pages/ObraDetalhe.jsx';
 import FornecedoresPage from './pages/Fornecedores.jsx';
+import PagamentosPage from './pages/Pagamentos.jsx';
 import ClientesPage from './pages/Clientes.jsx';
 import ArquivoPage from './pages/Arquivo.jsx';
 import PerfilPage from './pages/Perfil.jsx';
@@ -47,6 +48,7 @@ function AppRoutes() {
         <Route path="/obras"             element={<ProtectedRoute path="/obras"         element={<ObrasPage />} />} />
         <Route path="/obras/:id"         element={<ProtectedRoute path="/obras"         element={<ObraDetalhe />} />} />
         <Route path="/fornecedores"      element={<ProtectedRoute path="/fornecedores"  element={<FornecedoresPage />} />} />
+        <Route path="/pagamentos"        element={<ProtectedRoute path="/fornecedores"  element={<PagamentosPage />} />} />
         <Route path="/clientes"          element={<ProtectedRoute path="/clientes"      element={<ClientesPage />} />} />
         <Route path="/arquivo"           element={<ProtectedRoute path="/arquivo"       element={<ArquivoPage />} />} />
         <Route path="/perfil"            element={<ProtectedRoute path="/perfil"        element={<PerfilPage />} />} />

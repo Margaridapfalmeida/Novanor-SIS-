@@ -3,12 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { CLIENTES_DATA } from './Clientes';
 import { canEditModule, getAccessibleObraIds, loadPerfis } from '../context/PermissionsConfig';
-import EntityAccessEditorModal from '../components/access/EntityAccessEditorModal.jsx';
-import { withDemoSeed } from '../utils/deliveryMode';
 
-const STORAGE_KEY_CLIENTES = 'sis_clientes_extra';
-
-export const OBRAS_DATA = withDemoSeed([
+export const OBRAS_DATA = [
   {
     id: 'O142',
     nome: 'Centro Logístico Setúbal — Fase 2',
@@ -36,12 +32,12 @@ export const OBRAS_DATA = withDemoSeed([
     saldoFaturar: 1170000,
     pctFaturacao: 58.8,
     fases: [
-      { nome: 'Fundações',       orc: 480000, executado: 492000, previsto: 495000, desvioEur:  12000, desvioPct:  2.5, estado: 'critico'  },
-      { nome: 'Estrutura',       orc: 620000, executado: 635000, previsto: 648000, desvioEur:  15000, desvioPct:  2.4, estado: 'alerta'   },
-      { nome: 'Cobertura',       orc: 310000, executado: 298000, previsto: 302000, desvioEur: -12000, desvioPct: -3.9, estado: 'ok'       },
-      { nome: 'Inst. Elétricas', orc: 280000, executado: 271000, previsto: 275000, desvioEur:  -9000, desvioPct: -3.2, estado: 'ok'       },
-      { nome: 'Inst. AVAC',      orc: 195000, executado: 201000, previsto: 203000, desvioEur:   6000, desvioPct:  3.1, estado: 'atencao'  },
-      { nome: 'Acabamentos',     orc: 315000, executado: 0,      previsto: 0,      desvioEur:      0, desvioPct:  0,   estado: 'pendente' },
+      { nome: 'Fundações',       roc: 480000, executado: 492000, previsto: 495000, desvioEur:  12000, desvioPct:  2.5, estado: 'critico'  },
+      { nome: 'Estrutura',       roc: 620000, executado: 635000, previsto: 648000, desvioEur:  15000, desvioPct:  2.4, estado: 'alerta'   },
+      { nome: 'Cobertura',       roc: 310000, executado: 298000, previsto: 302000, desvioEur: -12000, desvioPct: -3.9, estado: 'ok'       },
+      { nome: 'Inst. Elétricas', roc: 280000, executado: 271000, previsto: 275000, desvioEur:  -9000, desvioPct: -3.2, estado: 'ok'       },
+      { nome: 'Inst. AVAC',      roc: 195000, executado: 201000, previsto: 203000, desvioEur:   6000, desvioPct:  3.1, estado: 'atencao'  },
+      { nome: 'Acabamentos',     roc: 315000, executado: 0,      previsto: 0,      desvioEur:      0, desvioPct:  0,   estado: 'pendente' },
     ],
     graficoCustos: [
       { mes: 'Jan', previsto: 200000,  real: 210000  },
@@ -105,10 +101,10 @@ export const OBRAS_DATA = withDemoSeed([
     saldoFaturar: 905000,
     pctFaturacao: 27.0,
     fases: [
-      { nome: 'Fundações',   orc: 180000, executado: 182000, previsto: 183000, desvioEur: 2000, desvioPct: 1.1, estado: 'atencao' },
-      { nome: 'Estrutura',   orc: 320000, executado: 85000,  previsto: 90000,  desvioEur: -5000, desvioPct: -1.6, estado: 'ok'    },
-      { nome: 'Cobertura',   orc: 240000, executado: 0,      previsto: 0,      desvioEur: 0, desvioPct: 0, estado: 'pendente'      },
-      { nome: 'Acabamentos', orc: 240000, executado: 0,      previsto: 0,      desvioEur: 0, desvioPct: 0, estado: 'pendente'      },
+      { nome: 'Fundações',   roc: 180000, executado: 182000, previsto: 183000, desvioEur: 2000, desvioPct: 1.1, estado: 'atencao' },
+      { nome: 'Estrutura',   roc: 320000, executado: 85000,  previsto: 90000,  desvioEur: -5000, desvioPct: -1.6, estado: 'ok'    },
+      { nome: 'Cobertura',   roc: 240000, executado: 0,      previsto: 0,      desvioEur: 0, desvioPct: 0, estado: 'pendente'      },
+      { nome: 'Acabamentos', roc: 240000, executado: 0,      previsto: 0,      desvioEur: 0, desvioPct: 0, estado: 'pendente'      },
     ],
     graficoCustos: [
       { mes: 'Fev', previsto: 180000, real: 182000 },
@@ -157,10 +153,10 @@ export const OBRAS_DATA = withDemoSeed([
     saldoFaturar: 107000,
     pctFaturacao: 88.0,
     fases: [
-      { nome: 'Demolições',    orc: 80000,  executado: 79000,  previsto: 79000,  desvioEur: -1000, desvioPct: -1.3, estado: 'ok' },
-      { nome: 'Estrutura',     orc: 220000, executado: 218000, previsto: 218000, desvioEur: -2000, desvioPct: -0.9, estado: 'ok' },
-      { nome: 'Instalações',   orc: 180000, executado: 176000, previsto: 176000, desvioEur: -4000, desvioPct: -2.2, estado: 'ok' },
-      { nome: 'Acabamentos',   orc: 240000, executado: 168000, previsto: 255000, desvioEur: 15000, desvioPct:  6.3, estado: 'alerta' },
+      { nome: 'Demolições',    roc: 80000,  executado: 79000,  previsto: 79000,  desvioEur: -1000, desvioPct: -1.3, estado: 'ok' },
+      { nome: 'Estrutura',     roc: 220000, executado: 218000, previsto: 218000, desvioEur: -2000, desvioPct: -0.9, estado: 'ok' },
+      { nome: 'Instalações',   roc: 180000, executado: 176000, previsto: 176000, desvioEur: -4000, desvioPct: -2.2, estado: 'ok' },
+      { nome: 'Acabamentos',   roc: 240000, executado: 168000, previsto: 255000, desvioEur: 15000, desvioPct:  6.3, estado: 'alerta' },
     ],
     graficoCustos: [
       { mes: 'Set', previsto: 80000,  real: 79000  },
@@ -217,11 +213,11 @@ export const OBRAS_DATA = withDemoSeed([
     saldoFaturar: 3040000,
     pctFaturacao: 5.0,
     fases: [
-      { nome: 'Fundações',   orc: 420000, executado: 136000, previsto: 420000, desvioEur: 4800, desvioPct: 4.8, estado: 'critico'  },
-      { nome: 'Estrutura',   orc: 850000, executado: 0,      previsto: 0,      desvioEur: 0,    desvioPct: 0,   estado: 'pendente' },
-      { nome: 'Cobertura',   orc: 480000, executado: 0,      previsto: 0,      desvioEur: 0,    desvioPct: 0,   estado: 'pendente' },
-      { nome: 'Instalações', orc: 520000, executado: 0,      previsto: 0,      desvioEur: 0,    desvioPct: 0,   estado: 'pendente' },
-      { nome: 'Acabamentos', orc: 330000, executado: 0,      previsto: 0,      desvioEur: 0,    desvioPct: 0,   estado: 'pendente' },
+      { nome: 'Fundações',   roc: 420000, executado: 136000, previsto: 420000, desvioEur: 4800, desvioPct: 4.8, estado: 'critico'  },
+      { nome: 'Estrutura',   roc: 850000, executado: 0,      previsto: 0,      desvioEur: 0,    desvioPct: 0,   estado: 'pendente' },
+      { nome: 'Cobertura',   roc: 480000, executado: 0,      previsto: 0,      desvioEur: 0,    desvioPct: 0,   estado: 'pendente' },
+      { nome: 'Instalações', roc: 520000, executado: 0,      previsto: 0,      desvioEur: 0,    desvioPct: 0,   estado: 'pendente' },
+      { nome: 'Acabamentos', roc: 330000, executado: 0,      previsto: 0,      desvioEur: 0,    desvioPct: 0,   estado: 'pendente' },
     ],
     graficoCustos: [
       { mes: 'Mar', previsto: 136000, real: 142800 },
@@ -242,7 +238,7 @@ export const OBRAS_DATA = withDemoSeed([
       { num: 'JADO #001', fase: 'Fundações', data: '14 Mar', desvio: 4.8, estado: 'aguarda-dp' },
     ],
   },
-]);
+];
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 const fmt = v => '€ ' + Number(v).toLocaleString('pt-PT');
@@ -344,9 +340,7 @@ function NovaObraModal({ onClose, onSave }) {
     valorVenda: '', custoPrevInicial: '', observacoes: '',
   });
   const [errors, setErrors]     = useState({});
-  const [fases, setFases]       = useState([{ nome: '', orc: '' }]);
-  const [importingFases, setImportingFases] = useState(false);
-  const [importFasesError, setImportFasesError] = useState('');
+  const [fases, setFases]       = useState([{ nome: '', roc: '' }]);
   const [planoFin, setPlanoFin] = useState(
     ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'].map(m => ({ mes: m, previsto: '', real: '' }))
   );
@@ -362,62 +356,9 @@ function NovaObraModal({ onClose, onSave }) {
   const optsPerfis   = todosPerfis.map(p => ({ label: p.nome, value: p.nome }));
 
   // Fases
-  const addFase = () => setFases(f => [...f, { nome: '', orc: '', codigo: '', subfases: [] }]);
+  const addFase = () => setFases(f => [...f, { nome: '', roc: '' }]);
   const setFase = (i, k, v) => setFases(f => f.map((x, j) => j === i ? { ...x, [k]: v } : x));
   const removeFase = i => setFases(f => f.filter((_, j) => j !== i));
-
-  const importFasesFromExcel = async (file) => {
-    setImportingFases(true);
-    setImportFasesError('');
-    try {
-      const XLSX = await import('xlsx');
-      const data = await file.arrayBuffer();
-      const wb = XLSX.read(data, { type: 'array' });
-      const targetSheet = wb.Sheets['Fases'] || wb.Sheets[wb.SheetNames[0]];
-      if (!targetSheet) throw new Error('Folha "Fases" não encontrada.');
-      const rows = XLSX.utils.sheet_to_json(targetSheet, { header: 1, defval: '' });
-      const headerIdx = rows.findIndex(row => row.some(cell => String(cell).toUpperCase().includes('CÓDIGO')) && row.some(cell => String(cell).toUpperCase().includes('DESCRIÇÃO')));
-      if (headerIdx < 0) throw new Error('Cabeçalho do modelo não encontrado.');
-
-      const imported = [];
-      let currentFase = null;
-      rows.slice(headerIdx + 1).forEach(row => {
-        const codigoRaw = row[0];
-        const descricao = String(row[1] || '').trim();
-        const quantidade = Number(String(row[2] || '').replace(',', '.')) || 0;
-        const unidade = String(row[3] || '').trim();
-        const preco = Number(String(row[4] || '').replace(/\s/g, '').replace(',', '.')) || 0;
-        const codigo = Number(codigoRaw);
-        if (!codigo || !descricao) return;
-
-        if (codigo % 100 === 0) {
-          currentFase = {
-            codigo: String(codigo),
-            nome: descricao,
-            orc: preco || '',
-            subfases: [],
-          };
-          imported.push(currentFase);
-          return;
-        }
-
-        if (!currentFase) return;
-        currentFase.subfases.push({
-          codigo: String(codigo),
-          nome: descricao,
-          quantidade,
-          unidade,
-          orc: preco,
-        });
-      });
-
-      if (imported.length === 0) throw new Error('Nenhuma fase válida encontrada no ficheiro.');
-      setFases(imported);
-    } catch (err) {
-      setImportFasesError(err.message || 'Não foi possível importar o ficheiro.');
-    }
-    setImportingFases(false);
-  };
 
   // Plano
   const setPlanoVal = (tipo, idx, key, val) => {
@@ -441,19 +382,9 @@ function NovaObraModal({ onClose, onSave }) {
     if (Object.keys(e).length) { setErrors(e); setSecao('geral'); return; }
     const fasesObj = fases.filter(f => f.nome.trim()).map(f => ({
       nome: f.nome.trim(),
-      codigo: f.codigo || '',
-      orc: Number(f.orc) || 0,
-      roc: Number(f.orc) || 0,
-      executado: 0,
-      previsto: Number(f.orc) || 0,
+      roc: Number(f.roc) || 0,
+      executado: 0, previsto: 0,
       desvioEur: 0, desvioPct: 0, estado: 'pendente',
-      subfases: (f.subfases || []).map(sub => ({
-        codigo: sub.codigo || '',
-        nome: sub.nome || '',
-        quantidade: Number(sub.quantidade) || 0,
-        unidade: sub.unidade || '',
-        orc: Number(sub.orc) || 0,
-      })),
     }));
     const graficoCustos = planoFin.filter(p => p.previsto).map(p => ({
       mes: p.mes, previsto: Number(p.previsto) || 0, real: p.real !== '' ? Number(p.real) : null,
@@ -461,14 +392,7 @@ function NovaObraModal({ onClose, onSave }) {
     const graficoCashflow = planoFis.filter(p => p.previsto || p.real).map(p => ({
       mes: p.mes, recebimentos: Number(p.previsto) || 0, pagamentos: Number(p.real) || 0,
     }));
-    const totalRoc = fasesObj.reduce((sum, fase) => sum + (fase.roc || fase.orc || 0), 0);
-    onSave({
-      ...form,
-      custoPrevInicial: form.custoPrevInicial || totalRoc,
-      fases: fasesObj,
-      graficoCustos,
-      graficoCashflow,
-    });
+    onSave({ ...form, fases: fasesObj, graficoCustos, graficoCashflow });
   };
 
   const inpStyle = (key) => ({
@@ -607,32 +531,10 @@ function NovaObraModal({ onClose, onSave }) {
               <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.5 }}>
                 Define as fases de custo da obra. O orçamento de cada fase será importado do Centralgest — podes preencher aqui ou actualizar depois.
               </div>
-              <div style={{ marginBottom: 16, padding: '10px 14px', background: 'var(--bg-app)', borderRadius: 8, border: '0.5px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-                <div>
-                  <div style={{ fontSize: 13, fontWeight: 500 }}>Importar fases e subfases do Excel</div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>Modelo esperado: folha `Fases` com `Código`, `Descrição`, `Quantidade`, `Unidade` e `Preço Composto`.</div>
-                </div>
-                <label style={{ cursor: 'pointer' }}>
-                  <input
-                    type="file"
-                    accept=".xlsx,.xls"
-                    style={{ display: 'none' }}
-                    onChange={e => {
-                      const file = e.target.files?.[0];
-                      if (file) importFasesFromExcel(file);
-                      e.target.value = '';
-                    }}
-                  />
-                  <span className="btn btn-sm">{importingFases ? '⏳ A importar...' : '📂 Importar Excel'}</span>
-                </label>
-              </div>
-              {importFasesError && <div style={{ fontSize: 12, color: 'var(--color-danger)', marginBottom: 12 }}>{importFasesError}</div>}
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                 <thead>
                   <tr style={{ background: 'var(--bg-app)' }}>
-                    <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', width: 110 }}>Código</th>
                     <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase' }}>Fase de custo</th>
-                    <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', width: 120 }}>Subfases</th>
                     <th style={{ padding: '8px 10px', textAlign: 'right', fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', width: 140 }}>Orçamento (€)</th>
                     <th style={{ width: 36 }} />
                   </tr>
@@ -641,20 +543,12 @@ function NovaObraModal({ onClose, onSave }) {
                   {fases.map((f, i) => (
                     <tr key={i} style={{ borderBottom: '0.5px solid var(--border)' }}>
                       <td style={{ padding: '6px 8px' }}>
-                        <input value={f.codigo || ''} onChange={e => setFase(i, 'codigo', e.target.value)}
-                          placeholder="100"
-                          style={{ width: '100%', fontFamily: 'var(--font-body)', fontSize: 13, padding: '6px 8px', border: '0.5px solid var(--border)', borderRadius: 6, background: 'var(--bg-card)', color: 'var(--text-primary)', outline: 'none', boxSizing: 'border-box' }} />
-                      </td>
-                      <td style={{ padding: '6px 8px' }}>
                         <input value={f.nome} onChange={e => setFase(i, 'nome', e.target.value)}
                           placeholder="ex: Fundações, Estrutura, Cobertura..."
                           style={{ width: '100%', fontFamily: 'var(--font-body)', fontSize: 13, padding: '6px 8px', border: '0.5px solid var(--border)', borderRadius: 6, background: 'var(--bg-card)', color: 'var(--text-primary)', outline: 'none', boxSizing: 'border-box' }} />
                       </td>
-                      <td style={{ padding: '6px 8px', fontSize: 12, color: 'var(--text-muted)' }}>
-                        {(f.subfases || []).length > 0 ? `${f.subfases.length} subfases` : '—'}
-                      </td>
                       <td style={{ padding: '6px 8px' }}>
-                        <input type="number" value={f.orc} onChange={e => setFase(i, 'orc', e.target.value)}
+                        <input type="number" value={f.roc} onChange={e => setFase(i, 'roc', e.target.value)}
                           placeholder="0"
                           style={{ width: '100%', fontFamily: 'var(--font-body)', fontSize: 13, padding: '6px 8px', border: '0.5px solid var(--border)', borderRadius: 6, background: 'var(--bg-card)', color: 'var(--text-primary)', outline: 'none', textAlign: 'right', boxSizing: 'border-box' }} />
                       </td>
@@ -668,10 +562,10 @@ function NovaObraModal({ onClose, onSave }) {
                 </tbody>
               </table>
               <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={addFase}>+ Adicionar fase</button>
-              {fases.some(f => f.orc) && (
+              {fases.some(f => f.roc) && (
                 <div style={{ marginTop: 12, fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>
                   Total orçamentado: <span style={{ color: 'var(--brand-primary)' }}>
-                    € {fases.reduce((s, f) => s + (Number(f.orc) || 0), 0).toLocaleString('pt-PT')}
+                    € {fases.reduce((s, f) => s + (Number(f.roc) || 0), 0).toLocaleString('pt-PT')}
                   </span>
                 </div>
               )}
@@ -809,17 +703,6 @@ function saveObrasExtra(list) {
   localStorage.setItem(STORAGE_KEY_OBRAS, JSON.stringify(list));
 }
 
-function loadClientesExtra() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY_CLIENTES) || '[]'); }
-  catch { return []; }
-}
-
-function saveClientesExtra(list) {
-  localStorage.setItem(STORAGE_KEY_CLIENTES, JSON.stringify(list));
-}
-
-const uniqueObras = (list = []) => [...new Set((list || []).filter(Boolean).map((item) => String(item).trim().toUpperCase()))];
-
 export default function ObrasPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -829,7 +712,6 @@ export default function ObrasPage() {
   const [extras, setExtras] = useState(loadObrasExtra);
   const [toast, setToast] = useState('');
   const [vistaObras, setVistaObras] = useState('galeria');
-  const [accessTarget, setAccessTarget] = useState(null);
 
   const allObras = [...OBRAS_DATA, ...extras];
   const allowedObraIds = getAccessibleObraIds(user, allObras);
@@ -876,49 +758,11 @@ export default function ObrasPage() {
       encomendas: [], alertas: [], jados: [],
       _userCreated: true,
     };
-
-    const clientesExtra = loadClientesExtra();
-    const clienteNome = nova.cliente.trim();
-    if (clienteNome) {
-      const clientesTodos = [...CLIENTES_DATA, ...clientesExtra];
-      const clienteExistente = clientesTodos.find(c => (c.nome || '').trim().toLowerCase() === clienteNome.toLowerCase());
-      let updatedClientes = clientesExtra;
-
-      if (!clienteExistente) {
-        const novoCliente = {
-          id: `CLI-EXTRA-${Date.now().toString().slice(-6)}`,
-          nome: clienteNome,
-          nif: '',
-          morada: '',
-          contacto: '',
-          email: '',
-          categoria: 'Cliente',
-          obras: [nova.id],
-          _userCreated: true,
-        };
-        updatedClientes = [...clientesExtra, novoCliente];
-      } else {
-        const idxExtra = clientesExtra.findIndex(c => c.id === clienteExistente.id);
-        const clienteAtualizado = {
-          ...clienteExistente,
-          obras: uniqueObras([...(clienteExistente.obras || []), nova.id]),
-        };
-        updatedClientes = idxExtra >= 0
-          ? clientesExtra.map((c, idx) => (idx === idxExtra ? clienteAtualizado : c))
-          : [...clientesExtra, { ...clienteAtualizado, _syncedFromObra: true }];
-      }
-
-      saveClientesExtra(updatedClientes);
-      window.dispatchEvent(new StorageEvent('storage', { key: STORAGE_KEY_CLIENTES, newValue: JSON.stringify(updatedClientes) }));
-    }
-
     const updated = [...extras, nova];
     setExtras(updated);
     saveObrasExtra(updated);
-    window.dispatchEvent(new StorageEvent('storage', { key: STORAGE_KEY_OBRAS, newValue: JSON.stringify(updated) }));
     setShowModal(false);
     setToast(`Obra "${nova.id}" criada com sucesso`);
-    navigate(`/obras/${nova.id}`);
     setTimeout(() => setToast(''), 3500);
   };
 
@@ -955,31 +799,13 @@ export default function ObrasPage() {
       )}
 
       {showModal && <NovaObraModal onClose={() => setShowModal(false)} onSave={handleSave} />}
-      {accessTarget && (
-        <EntityAccessEditorModal
-          entityType="obras"
-          entityId={accessTarget.id}
-          title={`Acessos — ${accessTarget.id} · ${accessTarget.nome}`}
-          subtitle={accessTarget.cliente}
-          sections={[
-            { key: 'resumo_financeiro', label: 'Resumo financeiro e indicadores', description: 'KPIs, custo previsto, tesouraria da obra e tabela de fases.' },
-            { key: 'graficos_cg', label: 'Gráficos de controlo de gestão', description: 'Evolução financeira, cashflow e desvios por fase.' },
-            { key: 'encomendas', label: 'Encomendas e ficha de obra', description: 'Criação, satisfação e ficha de obra.' },
-            { key: 'jado', label: 'Alertas e JADO', description: 'Alertas, histórico JADO e ações de validação.' },
-            { key: 'faturas', label: 'Faturas e relatórios', description: 'Faturas ligadas à obra e relatórios PDF.' },
-          ]}
-          onClose={() => setAccessTarget(null)}
-        />
-      )}
 
       <div className="page-header">
         <div>
           <div className="page-title">Obras</div>
           <div className="page-subtitle">{visibleObras.length} obras em curso · Controlo de gestão financeira</div>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {canEditObrasModule && <button className="btn btn-primary" onClick={() => setShowModal(true)}>+ Nova obra</button>}
-        </div>
+        {canEditObrasModule && <button className="btn btn-primary" onClick={() => setShowModal(true)}>+ Nova obra</button>}
       </div>
 
       {/* KPIs rápidos — grid horizontal explícito */}
@@ -1068,15 +894,6 @@ export default function ObrasPage() {
                     ✕
                   </button>
                 )}
-                {canEditObrasModule && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); setAccessTarget(obra); }}
-                    title="Gerir acessos desta obra"
-                    style={{ position: 'absolute', top: 10, right: obra._userCreated ? 36 : 10, background: 'var(--bg-card)', border: '0.5px solid var(--border)', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: 12, padding: '4px 8px', borderRadius: 8, zIndex: 1 }}
-                  >
-                    Acessos
-                  </button>
-                )}
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
                   <div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
@@ -1138,7 +955,7 @@ export default function ObrasPage() {
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
               <tr style={{ background: 'var(--bg-app)', borderBottom: '0.5px solid var(--border)' }}>
-                {[...['Código','Obra','Cliente','DP','Datas','Exec. Fin.','Exec. Fís.','Valor Venda','Margem','Alertas','Estado'], ...(canEditObrasModule ? ['Acessos'] : [])].map(h => (
+                {['Código','Obra','Cliente','DP','Datas','Exec. Fin.','Exec. Fís.','Valor Venda','Margem','Alertas','Estado'].map(h => (
                   <th key={h} style={{ padding: '10px 12px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', whiteSpace: 'nowrap' }}>{h}</th>
                 ))}
               </tr>
@@ -1189,11 +1006,6 @@ export default function ObrasPage() {
                     <td style={{ padding: '10px 12px' }}>
                       <span className={`badge ${est.cls}`}>{est.label}</span>
                     </td>
-                    {canEditObrasModule && (
-                      <td style={{ padding: '10px 12px' }}>
-                        <button className="btn btn-sm" onClick={(e) => { e.stopPropagation(); setAccessTarget(obra); }}>Gerir</button>
-                      </td>
-                    )}
                   </tr>
                 );
               })}

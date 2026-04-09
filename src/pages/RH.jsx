@@ -90,6 +90,32 @@ const LS_FER  = 'sis_rh_ferias';
 const LS_HOR  = 'sis_rh_horarios';
 const LS_PAS  = 'sis_rh_passagens';
 const LS_DESP = 'sis_rh_despesas';
+const RH_REGIMES = [
+  'Híbrido',
+  'Teletrabalho',
+  'Presencial 8 às 17',
+  'Presencial 9 às 18',
+  'Isenção de horário',
+  'Part-time',
+  'Outro',
+];
+const RH_EXTRA_DEFAULTS = {
+  ms: { nacionalidade: 'Portuguesa', tipoContrato: 'Sem termo', habilitacoes: 'Mestrado', taxaAssiduidade: 98, dataNascimento: '1978-03-14' },
+  lg: { nacionalidade: 'Portuguesa', tipoContrato: 'Sem termo', habilitacoes: 'Licenciatura', taxaAssiduidade: 97, dataNascimento: '1984-07-18' },
+  ca: { nacionalidade: 'Portuguesa', tipoContrato: 'Sem termo', habilitacoes: '12.º ano', taxaAssiduidade: 96, dataNascimento: '1991-02-03' },
+  cg: { nacionalidade: 'Portuguesa', tipoContrato: 'Sem termo', habilitacoes: 'Licenciatura', taxaAssiduidade: 98, dataNascimento: '1989-11-20' },
+  dp: { nacionalidade: 'Portuguesa', tipoContrato: 'Sem termo', habilitacoes: 'Licenciatura', taxaAssiduidade: 95, dataNascimento: '1977-09-12' },
+  ga: { nacionalidade: 'Portuguesa', tipoContrato: 'Sem termo', habilitacoes: '12.º ano', taxaAssiduidade: 97, dataNascimento: '1993-05-09' },
+  jms: { nacionalidade: 'Portuguesa', tipoContrato: 'Sem termo', habilitacoes: 'Licenciatura', taxaAssiduidade: 96, dataNascimento: '1986-04-11' },
+  pr: { nacionalidade: 'Portuguesa', tipoContrato: 'Sem termo', habilitacoes: 'Licenciatura', taxaAssiduidade: 95, dataNascimento: '1982-06-28' },
+  fs: { nacionalidade: 'Portuguesa', tipoContrato: 'Sem termo', habilitacoes: 'Licenciatura', taxaAssiduidade: 96, dataNascimento: '1988-01-08' },
+  js: { nacionalidade: 'Portuguesa', tipoContrato: 'Sem termo', habilitacoes: 'Licenciatura', taxaAssiduidade: 97, dataNascimento: '1980-12-16' },
+  ap: { nacionalidade: 'Portuguesa', tipoContrato: 'Sem termo', habilitacoes: 'Licenciatura', taxaAssiduidade: 95, dataNascimento: '1983-08-24' },
+  db: { nacionalidade: 'Portuguesa', tipoContrato: 'Sem termo', habilitacoes: 'Licenciatura', taxaAssiduidade: 94, dataNascimento: '1985-10-07' },
+  ha: { nacionalidade: 'Angolana', tipoContrato: 'Sem termo', habilitacoes: 'Licenciatura', taxaAssiduidade: 95, dataNascimento: '1981-03-29' },
+  mrm: { nacionalidade: 'Portuguesa', tipoContrato: 'Sem termo', habilitacoes: 'Licenciatura', taxaAssiduidade: 96, dataNascimento: '1979-05-22' },
+  cd: { nacionalidade: 'Portuguesa', tipoContrato: 'Sem termo', habilitacoes: 'Licenciatura', taxaAssiduidade: 97, dataNascimento: '1980-01-30' },
+};
 
 function load(key, def) { try { return JSON.parse(localStorage.getItem(key) || 'null') || def; } catch { return def; } }
 function save(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
@@ -131,6 +157,70 @@ function loadManageableCollaborators(user) {
 }
 
 const fmt = v => '€ ' + Number(v).toLocaleString('pt-PT', { minimumFractionDigits: 2 });
+
+function loadPerfilExtraMap() {
+  try {
+    return JSON.parse(localStorage.getItem('sis_perfil_extra') || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function getRhExtra(perfil, extraMap = loadPerfilExtraMap()) {
+  const base = RH_EXTRA_DEFAULTS[perfil?.id] || {};
+  const extra = extraMap?.[perfil?.id] || {};
+  return {
+    salario: 0,
+    dataAdmissao: '',
+    nacionalidade: '',
+    dataNascimento: '',
+    tipoContrato: '',
+    habilitacoes: '',
+    taxaAssiduidade: '',
+    ...base,
+    ...extra,
+  };
+}
+
+function getAgeFromPerfil(perfil, extra = null) {
+  const idadeNumerica = Number(perfil?.idade);
+  if (Number.isFinite(idadeNumerica) && idadeNumerica > 0) return idadeNumerica;
+  const dataNascimento = (extra || getRhExtra(perfil)).dataNascimento;
+  if (!dataNascimento) return null;
+  const birth = new Date(`${dataNascimento}T00:00:00`);
+  if (Number.isNaN(birth.getTime())) return null;
+  const today = new Date();
+  let age = today.getFullYear() - birth.getFullYear();
+  const monthDiff = today.getMonth() - birth.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birth.getDate())) age -= 1;
+  return age > 0 ? age : null;
+}
+
+function formatPercent(value, total) {
+  if (!total) return '0%';
+  return `${Math.round((value / total) * 100)}%`;
+}
+
+function formatPercentValue(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  return `${Number(value).toFixed(1)}%`;
+}
+
+function formatDatePt(value) {
+  if (!value) return '—';
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(value) ? new Date(`${value}T00:00:00`) : new Date(value);
+  return Number.isNaN(d.getTime()) ? value : d.toLocaleDateString('pt-PT');
+}
+
+function computeTenureYears(value) {
+  if (!value) return null;
+  const iso = /^\d{2}\/\d{2}\/\d{4}$/.test(value) ? value.split('/').reverse().join('-') : value;
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return null;
+  const today = new Date();
+  const years = (today - d) / (365.25 * 24 * 60 * 60 * 1000);
+  return years > 0 ? years : 0;
+}
 
 // ─── SECÇÃO: COLABORADORES ────────────────────────────────────────────────────
 function Colaboradores({ abrirColaboradorId }) {
@@ -251,7 +341,10 @@ function Colaboradores({ abrirColaboradorId }) {
   };
 
   // Adicionar novo colaborador — cria entrada em sis_perfis com isColaborador=true
-  const [formNovo, setFormNovo] = useState({ nome:'', email:'', role:'', departamento:'outro', colaboradorId:'', idade:'', genero:'', salario:'', dataAdmissao:'' });
+  const [formNovo, setFormNovo] = useState({
+    nome:'', email:'', role:'', departamento:'outro', colaboradorId:'', idade:'', genero:'',
+    salario:'', dataAdmissao:'', nacionalidade:'', dataNascimento:'', tipoContrato:'', habilitacoes:'', taxaAssiduidade:''
+  });
   const setFN = (k,v) => setFormNovo(f=>({...f,[k]:v}));
 
   const abrirEdicao = (p) => {
@@ -266,6 +359,11 @@ function Colaboradores({ abrirColaboradorId }) {
       genero: p.genero || '',
       salario: extra.salario || '',
       dataAdmissao: extra.dataAdmissao || '',
+      nacionalidade: extra.nacionalidade || '',
+      dataNascimento: extra.dataNascimento || '',
+      tipoContrato: extra.tipoContrato || '',
+      habilitacoes: extra.habilitacoes || '',
+      taxaAssiduidade: extra.taxaAssiduidade || '',
     });
     setShowNovo(p);
   };
@@ -292,8 +390,19 @@ function Colaboradores({ abrirColaboradorId }) {
     };
     savePerfisAndSync([...todos, novo]);
     // Store RH-specific fields in extra
-    setExtra(id, { salario: Number(formNovo.salario)||0, dataAdmissao: formNovo.dataAdmissao });
-    setFormNovo({ nome:'', email:'', role:'', departamento:'outro', colaboradorId:'', idade:'', genero:'', salario:'', dataAdmissao:'' });
+    setExtra(id, {
+      salario: Number(formNovo.salario)||0,
+      dataAdmissao: formNovo.dataAdmissao,
+      nacionalidade: formNovo.nacionalidade,
+      dataNascimento: formNovo.dataNascimento,
+      tipoContrato: formNovo.tipoContrato,
+      habilitacoes: formNovo.habilitacoes,
+      taxaAssiduidade: formNovo.taxaAssiduidade === '' ? '' : Number(formNovo.taxaAssiduidade),
+    });
+    setFormNovo({
+      nome:'', email:'', role:'', departamento:'outro', colaboradorId:'', idade:'', genero:'',
+      salario:'', dataAdmissao:'', nacionalidade:'', dataNascimento:'', tipoContrato:'', habilitacoes:'', taxaAssiduidade:''
+    });
     setShowNovo(null);
   };
 
@@ -320,9 +429,20 @@ function Colaboradores({ abrirColaboradorId }) {
         }
       : p);
     savePerfisAndSync(updated);
-    setExtra(showNovo.id, { salario: Number(formNovo.salario) || 0, dataAdmissao: formNovo.dataAdmissao || '' });
+    setExtra(showNovo.id, {
+      salario: Number(formNovo.salario) || 0,
+      dataAdmissao: formNovo.dataAdmissao || '',
+      nacionalidade: formNovo.nacionalidade || '',
+      dataNascimento: formNovo.dataNascimento || '',
+      tipoContrato: formNovo.tipoContrato || '',
+      habilitacoes: formNovo.habilitacoes || '',
+      taxaAssiduidade: formNovo.taxaAssiduidade === '' ? '' : Number(formNovo.taxaAssiduidade),
+    });
     setSelected(s => (s?.id === showNovo.id ? { ...s, ...updated.find(p => p.id === showNovo.id) } : s));
-    setFormNovo({ nome:'', email:'', role:'', departamento:'outro', colaboradorId:'', idade:'', genero:'', salario:'', dataAdmissao:'' });
+    setFormNovo({
+      nome:'', email:'', role:'', departamento:'outro', colaboradorId:'', idade:'', genero:'',
+      salario:'', dataAdmissao:'', nacionalidade:'', dataNascimento:'', tipoContrato:'', habilitacoes:'', taxaAssiduidade:''
+    });
     setShowNovo(null);
   };
 
@@ -390,10 +510,31 @@ function Colaboradores({ abrirColaboradorId }) {
             <span style={{ fontSize:12, fontWeight:400, color:'var(--text-muted)', marginLeft:8 }}>Também cria perfil de acesso no SIS</span>
           </div>
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:'10px 14px' }}>
-            {[['Nome completo *','nome','text',''],['Email','email','email','nome@novanor.pt'],['Cargo / Função','role','text','ex: Diretor de Obra'],['ID Colaborador','colaboradorId','text','ex: COL-016'],['Idade','idade','number',''],['Data de Admissão','dataAdmissao','date',''],['Salário Bruto (€)','salario','number',''],].map(([label,key,type,placeholder])=>(
+            {[
+              ['Nome completo *','nome','text',''],
+              ['Email','email','email','nome@novanor.pt'],
+              ['Cargo / Função','role','text','ex: Diretor de Obra'],
+              ['ID Colaborador','colaboradorId','text','ex: COL-016'],
+              ['Idade','idade','number',''],
+              ['Data de Nascimento','dataNascimento','date',''],
+              ['Data de Admissão','dataAdmissao','date',''],
+              ['Salário Bruto (€)','salario','number',''],
+              ['Nacionalidade','nacionalidade','text','ex: Portuguesa'],
+              ['Tipo de contrato','tipoContrato','text','ex: Sem termo'],
+              ['Habilitações','habilitacoes','text','ex: Licenciatura'],
+              ['Taxa de assiduidade (%)','taxaAssiduidade','number','ex: 96'],
+            ].map(([label,key,type,placeholder])=>(
               <div key={key}>
                 <label style={{ display:'block', fontSize:11, fontWeight:600, color:'var(--text-secondary)', marginBottom:5 }}>{label}</label>
-                <input type={type} value={formNovo[key]} onChange={e=>setFN(key,e.target.value)} placeholder={placeholder} style={IS} />
+                <input
+                  type={type}
+                  value={formNovo[key]}
+                  onChange={e=>setFN(key,e.target.value)}
+                  placeholder={placeholder}
+                  min={key === 'taxaAssiduidade' ? 0 : undefined}
+                  max={key === 'taxaAssiduidade' ? 100 : undefined}
+                  style={IS}
+                />
               </div>
             ))}
             <div>
@@ -502,10 +643,12 @@ function Colaboradores({ abrirColaboradorId }) {
       {/* Detalhe colaborador */}
       {selected && (() => {
         const foto = getFotoColaborador(selected.id);
-        const extra = getExtra(selected.id);
+        const extra = getRhExtra(selected, loadPerfilExtraMap());
         const dept = DEPARTAMENTOS.find(d=>d.id===selected.departamento);
         const podeGerirDocs = canAccessVencDocs(user, selected.id);
         const docsColaborador = docsVencimento.filter(doc => doc.colaboradorId === selected.id);
+        const regimeActual = load(LS_HOR, {})[selected.id] || '—';
+        const idadeCalculada = getAgeFromPerfil(selected, extra);
         return (
           <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.4)', zIndex:500, display:'flex', alignItems:'center', justifyContent:'center', padding:'1rem' }}>
             <div style={{ background:'var(--bg-card)', borderRadius:'var(--radius-lg)', border:'0.5px solid var(--border)', width:'100%', maxWidth:860, maxHeight:'88vh', overflowY:'auto', boxShadow:'0 16px 48px rgba(0,0,0,0.2)' }}>
@@ -528,9 +671,15 @@ function Colaboradores({ abrirColaboradorId }) {
                   ['Cargo', selected.role||'—'],
                   ['Email', selected.email||'—'],
                   ['Género', selected.genero==='M'?'Masculino':selected.genero==='F'?'Feminino':selected.genero||'—'],
-                  ['Idade', selected.idade ? selected.idade + ' anos' : '—'],
-                  ['Admissão', extra.dataAdmissao||'—'],
+                  ['Idade', idadeCalculada ? idadeCalculada + ' anos' : '—'],
+                  ['Data de nascimento', formatDatePt(extra.dataNascimento)],
+                  ['Admissão', formatDatePt(extra.dataAdmissao)],
                   ['Salário Bruto', extra.salario ? fmt(extra.salario) : '—'],
+                  ['Nacionalidade', extra.nacionalidade || '—'],
+                  ['Tipo de contrato', extra.tipoContrato || '—'],
+                  ['Habilitações', extra.habilitacoes || '—'],
+                  ['Taxa de assiduidade', formatPercentValue(extra.taxaAssiduidade)],
+                  ['Regime de trabalho', regimeActual],
                   ['Estado', selected.inativo?'Inactivo':'Activo'],
                 ].map(([l,v])=>(
                   <div key={l}>
@@ -815,9 +964,13 @@ function FeriasEFaltas() {
                       <td key={d} title={it ? `${it.tipo} — ${it.estado}` : ''}
                         style={{ padding:0, height:26, background: cor ? cor+'33' : fds?'var(--bg-app)':'transparent', borderRight:'0.5px solid var(--border-light, #f0f0f0)' }}>
                         {it && (
-                          <div style={{ height:'100%', background:cor, display:'flex', alignItems:'center', justifyContent:'center', fontSize:8, fontWeight:700, color:'#fff', opacity: it.estado==='rejeitado'?0.4:it.estado==='pendente'?0.7:1 }}>
-                            {it.tipo.slice(0,2).toUpperCase()}
-                          </div>
+                          <div
+                            style={{
+                              height:'100%',
+                              background:cor,
+                              opacity: it.estado==='rejeitado' ? 0.4 : it.estado==='pendente' ? 0.7 : 1,
+                            }}
+                          />
                         )}
                       </td>
                     );
@@ -902,8 +1055,8 @@ function FeriasEFaltas() {
         </div>
           <div style={{ display:'flex', gap:8 }}>
             <div style={{ display:'flex', background:'var(--bg-app)', borderRadius:8, border:'0.5px solid var(--border)', overflow:'hidden' }}>
-              <button onClick={()=>setViewTab('calendario')} style={{ padding:'6px 14px', border:'none', cursor:'pointer', fontSize:12, background:viewTab==='calendario'?'var(--brand-primary)':'transparent', color:viewTab==='calendario'?'#fff':'var(--text-muted)', fontFamily:'var(--font-body)' }}>📅 Calendário</button>
-              <button onClick={()=>setViewTab('anual')} style={{ padding:'6px 14px', border:'none', cursor:'pointer', fontSize:12, background:viewTab==='anual'?'var(--brand-primary)':'transparent', color:viewTab==='anual'?'#fff':'var(--text-muted)', fontFamily:'var(--font-body)' }}>🧩 Anual (Excel)</button>
+              <button onClick={()=>setViewTab('calendario')} style={{ padding:'6px 14px', border:'none', cursor:'pointer', fontSize:12, background:viewTab==='calendario'?'var(--brand-primary)':'transparent', color:viewTab==='calendario'?'#fff':'var(--text-muted)', fontFamily:'var(--font-body)' }}>📅 Mensal</button>
+              <button onClick={()=>setViewTab('anual')} style={{ padding:'6px 14px', border:'none', cursor:'pointer', fontSize:12, background:viewTab==='anual'?'var(--brand-primary)':'transparent', color:viewTab==='anual'?'#fff':'var(--text-muted)', fontFamily:'var(--font-body)' }}>🧩 Calendário</button>
               <button onClick={()=>setViewTab('resumo')} style={{ padding:'6px 14px', border:'none', cursor:'pointer', fontSize:12, background:viewTab==='resumo'?'var(--brand-primary)':'transparent', color:viewTab==='resumo'?'#fff':'var(--text-muted)', fontFamily:'var(--font-body)' }}>📋 Lista</button>
           </div>
           <div style={{ display:'flex', gap:4, alignItems:'center' }}>
@@ -1104,15 +1257,6 @@ function GestaoHorarios() {
   const [search, setSearch] = useState('');
   const isEditor = Boolean(user?.isAdmin || (user?.departamento || '').toLowerCase() === 'rh' || (user?.role || '').toLowerCase().includes('recursos humanos'));
   const IS = { fontFamily:'var(--font-body)', fontSize:13, padding:'7px 10px', border:'0.5px solid var(--border-strong)', borderRadius:8, background:'var(--bg-card)', color:'var(--text-primary)', outline:'none', width:'100%', boxSizing:'border-box' };
-  const REGIMES = [
-    'Híbrido',
-    'Teletrabalho',
-    'Presencial 8 às 17',
-    'Presencial 9 às 18',
-    'Isenção de horário',
-    'Part-time',
-    'Outro',
-  ];
 
   useEffect(() => {
     const handler = () => setPerfis(loadPerfis().filter(p => p.isColaborador));
@@ -1172,7 +1316,7 @@ function GestaoHorarios() {
                     {isEditor ? (
                       <select value={mapaRegimes[p.id] || ''} onChange={e => setRegime(p.id, e.target.value)} style={IS}>
                         <option value="">Selecionar...</option>
-                        {REGIMES.map(regime => <option key={regime} value={regime}>{regime}</option>)}
+                        {RH_REGIMES.map(regime => <option key={regime} value={regime}>{regime}</option>)}
                       </select>
                     ) : (
                       <span style={{ color:'var(--text-secondary)' }}>{mapaRegimes[p.id] || '—'}</span>
@@ -1429,44 +1573,243 @@ function Feriados() {
   );
 }
 
-// ─── SECÇÃO: CATEGORIAS ───────────────────────────────────────────────────────
-function Categorias() {
-  const colab = loadPerfis().filter(p => p.isColaborador);
-  const cats = [...new Set(colab.map(c=>c.categoria))].map(cat => {
-    const grupo = colab.filter(c=>c.categoria===cat);
-    const salMedio = grupo.reduce((s,c)=>s+(c.salario||0),0)/grupo.length;
-    const depts = [...new Set(grupo.map(c=>c.dept))];
-    return { cat, count:grupo.length, salMedio, depts };
+// ─── SECÇÃO: ESTATÍSTICAS ─────────────────────────────────────────────────────
+function EstatisticasRH() {
+  const perfis = loadPerfis().filter(p => p.isColaborador);
+  const extraMap = loadPerfilExtraMap();
+  const regimes = load(LS_HOR, {});
+  const total = perfis.length;
+  const rows = perfis.map((perfil) => {
+    const extra = getRhExtra(perfil, extraMap);
+    const idade = getAgeFromPerfil(perfil, extra);
+    const salario = Number(extra.salario) || 0;
+    const assiduidade = extra.taxaAssiduidade === '' || extra.taxaAssiduidade === null || extra.taxaAssiduidade === undefined
+      ? null
+      : Number(extra.taxaAssiduidade);
+    return {
+      perfil,
+      extra,
+      idade,
+      salario,
+      assiduidade,
+      regime: regimes[perfil.id] || 'Não definido',
+      departamento: DEPARTAMENTOS.find(d => d.id === perfil.departamento)?.label || perfil.departamento || 'Outro',
+    };
   });
-  const cores = { 'Quadros Superiores':'#1C3A5E','Quadros Médios':'#2E7D52','Técnicos':'#6B2E7A','Administrativos':'#8B4A12' };
-  return (
-    <div>
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:14 }}>
-        {cats.map(c => (
-          <div key={c.cat} className="card" style={{ padding:'20px', borderLeft:`4px solid ${cores[c.cat]||'var(--border)'}` }}>
-            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:14 }}>
-              <div>
-                <div style={{ fontWeight:700, fontSize:15 }}>{c.cat}</div>
-                <div style={{ fontSize:12, color:'var(--text-muted)', marginTop:2 }}>{c.depts.join(' · ')}</div>
-              </div>
-              <div style={{ background:cores[c.cat]||'var(--border)', color:'#fff', borderRadius:20, padding:'4px 12px', fontSize:12, fontWeight:700 }}>{c.count}</div>
+
+  const totalAtivos = rows.filter(r => !r.perfil.inativo).length;
+  const generoCounts = {
+    masculino: rows.filter(r => r.perfil.genero === 'M').length,
+    feminino: rows.filter(r => r.perfil.genero === 'F').length,
+    outro: rows.filter(r => !['M', 'F', ''].includes(r.perfil.genero || '') && r.perfil.genero !== undefined).length,
+    naoIndicado: rows.filter(r => !r.perfil.genero).length,
+  };
+  const ageBands = [
+    { label: '< 30', count: rows.filter(r => (r.idade || 0) > 0 && r.idade < 30).length },
+    { label: '30–39', count: rows.filter(r => r.idade >= 30 && r.idade <= 39).length },
+    { label: '40–49', count: rows.filter(r => r.idade >= 40 && r.idade <= 49).length },
+    { label: '50+', count: rows.filter(r => r.idade >= 50).length },
+  ];
+  const avgAge = rows.filter(r => r.idade).length
+    ? rows.filter(r => r.idade).reduce((sum, r) => sum + r.idade, 0) / rows.filter(r => r.idade).length
+    : 0;
+  const avgAssiduidade = rows.filter(r => r.assiduidade !== null).length
+    ? rows.filter(r => r.assiduidade !== null).reduce((sum, r) => sum + r.assiduidade, 0) / rows.filter(r => r.assiduidade !== null).length
+    : 0;
+  const avgTenure = rows
+    .map(r => computeTenureYears(r.extra.dataAdmissao))
+    .filter(v => v !== null);
+  const avgTenureValue = avgTenure.length ? avgTenure.reduce((sum, v) => sum + v, 0) / avgTenure.length : 0;
+  const missingDataCount = rows.filter(r =>
+    !r.extra.nacionalidade || !r.extra.tipoContrato || !r.extra.habilitacoes || r.assiduidade === null || !r.extra.dataNascimento
+  ).length;
+
+  const regimeStats = Object.entries(
+    rows.reduce((acc, row) => {
+      acc[row.regime] = (acc[row.regime] || 0) + 1;
+      return acc;
+    }, {})
+  ).sort((a, b) => b[1] - a[1]);
+
+  const nationalityStats = Object.entries(
+    rows.reduce((acc, row) => {
+      const key = row.extra.nacionalidade || 'Não definida';
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {})
+  ).sort((a, b) => b[1] - a[1]);
+
+  const contractStats = Object.entries(
+    rows.reduce((acc, row) => {
+      const key = row.extra.tipoContrato || 'Não definido';
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {})
+  ).sort((a, b) => b[1] - a[1]);
+
+  const deptStats = Object.entries(
+    rows.reduce((acc, row) => {
+      acc[row.departamento] = (acc[row.departamento] || 0) + 1;
+      return acc;
+    }, {})
+  ).sort((a, b) => b[1] - a[1]);
+
+  const escolaridadeStats = Object.entries(
+    rows.reduce((acc, row) => {
+      const key = row.extra.habilitacoes || 'Não definida';
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {})
+  ).sort((a, b) => b[1] - a[1]);
+
+  const topSalary = [...rows].sort((a, b) => b.salario - a.salario).slice(0, 5);
+  const genderChart = [
+    { label: 'Homens', value: generoCounts.masculino, color: '#1C3A5E' },
+    { label: 'Mulheres', value: generoCounts.feminino, color: '#C47A1A' },
+    { label: 'Outro/Não indicado', value: generoCounts.outro + generoCounts.naoIndicado, color: '#7A7F87' },
+  ];
+
+  const renderDistributionCard = (title, items, color = 'var(--brand-primary)') => (
+    <div className="card" style={{ padding:'18px 20px' }}>
+      <div style={{ fontWeight:700, fontSize:14, marginBottom:14 }}>{title}</div>
+      <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+        {items.length === 0 && <div style={{ fontSize:13, color:'var(--text-muted)' }}>Sem dados.</div>}
+        {items.map(([label, value]) => (
+          <div key={label}>
+            <div style={{ display:'flex', justifyContent:'space-between', gap:8, fontSize:12, marginBottom:4 }}>
+              <span style={{ fontWeight:600 }}>{label}</span>
+              <span style={{ color:'var(--text-muted)' }}>{value} · {formatPercent(value, total)}</span>
             </div>
-            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
-              <div style={{ background:'var(--bg-app)', borderRadius:7, padding:'8px 12px' }}>
-                <div style={{ fontSize:10, color:'var(--text-muted)', marginBottom:2 }}>Colaboradores</div>
-                <div style={{ fontSize:20, fontWeight:700 }}>{c.count}</div>
-              </div>
-              <div style={{ background:'var(--bg-app)', borderRadius:7, padding:'8px 12px' }}>
-                <div style={{ fontSize:10, color:'var(--text-muted)', marginBottom:2 }}>Sal. Médio</div>
-                <div style={{ fontSize:16, fontWeight:700, color:cores[c.cat] }}>{fmt(c.salMedio)}</div>
-              </div>
+            <div style={{ height:6, borderRadius:999, background:'var(--bg-app)', overflow:'hidden' }}>
+              <div style={{ width: `${total ? (value / total) * 100 : 0}%`, height:'100%', background:color, borderRadius:999 }} />
             </div>
-            <div style={{ marginTop:12, height:4, background:'var(--border)', borderRadius:2, overflow:'hidden' }}>
-              <div style={{ height:'100%', width:`${(c.count/colab.length*100).toFixed(0)}%`, background:cores[c.cat]||'var(--brand-primary)', borderRadius:2 }} />
-            </div>
-            <div style={{ fontSize:11, color:'var(--text-muted)', marginTop:4 }}>{(c.count/colab.length*100).toFixed(0)}% do total</div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(5, minmax(0, 1fr))', gap:12, marginBottom:20 }}>
+        {[
+          { label:'Colaboradores ativos', value: totalAtivos, sub:`${total} no total`, cor:'var(--brand-primary)' },
+          { label:'Taxa média assiduidade', value: avgAssiduidade ? formatPercentValue(avgAssiduidade) : '—', sub:'Média dos colaboradores', cor:'var(--color-success)' },
+          { label:'Idade média', value: avgAge ? `${avgAge.toFixed(1)} anos` : '—', sub:'Com base nos dados disponíveis', cor:'#8B4A12' },
+          { label:'Antiguidade média', value: avgTenureValue ? `${avgTenureValue.toFixed(1)} anos` : '—', sub:'Desde a admissão', cor:'#6B2E7A' },
+          { label:'Perfis por completar', value: missingDataCount, sub:'Faltam dados para RH', cor:'var(--color-warning)' },
+        ].map(card => (
+          <div key={card.label} className="kpi-card">
+            <div className="kpi-label">{card.label}</div>
+            <div className="kpi-value" style={{ color:card.cor }}>{card.value}</div>
+            <div className="kpi-delta up">{card.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display:'grid', gridTemplateColumns:'1.3fr 1fr', gap:14, marginBottom:14 }}>
+        <div className="card" style={{ padding:'18px 20px' }}>
+          <div style={{ fontWeight:700, fontSize:14, marginBottom:14 }}>Distribuição por género</div>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(3, minmax(0, 1fr))', gap:12 }}>
+            {genderChart.map(item => (
+              <div key={item.label} style={{ background:'var(--bg-app)', borderRadius:10, padding:'12px 14px' }}>
+                <div style={{ fontSize:11, color:'var(--text-muted)', textTransform:'uppercase', letterSpacing:'0.04em', marginBottom:6 }}>{item.label}</div>
+                <div style={{ fontSize:24, fontWeight:700, color:item.color }}>{item.value}</div>
+                <div style={{ fontSize:12, color:'var(--text-muted)', marginTop:2 }}>{formatPercent(item.value, total)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="card" style={{ padding:'18px 20px' }}>
+          <div style={{ fontWeight:700, fontSize:14, marginBottom:14 }}>Rácio etário</div>
+          <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+            {ageBands.map(item => (
+              <div key={item.label}>
+                <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, marginBottom:4 }}>
+                  <span style={{ fontWeight:600 }}>{item.label}</span>
+                  <span style={{ color:'var(--text-muted)' }}>{item.count} · {formatPercent(item.count, total)}</span>
+                </div>
+                <div style={{ height:7, background:'var(--bg-app)', borderRadius:999, overflow:'hidden' }}>
+                  <div style={{ width:`${total ? (item.count / total) * 100 : 0}%`, height:'100%', background:'#1C3A5E', borderRadius:999 }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:14, marginBottom:14 }}>
+        {renderDistributionCard('Regimes de trabalho', regimeStats, '#2E7D52')}
+        {renderDistributionCard('Nacionalidades', nationalityStats, '#C47A1A')}
+      </div>
+
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:14, marginBottom:14 }}>
+        {renderDistributionCard('Tipos de contrato', contractStats, '#6B2E7A')}
+        {renderDistributionCard('Habilitações', escolaridadeStats, '#8B4A12')}
+      </div>
+
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:14 }}>
+        <div className="card" style={{ padding:'18px 20px' }}>
+          <div style={{ fontWeight:700, fontSize:14, marginBottom:14 }}>Distribuição por departamento</div>
+          <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+            {deptStats.map(([label, value]) => (
+              <div key={label} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, padding:'10px 12px', border:'0.5px solid var(--border)', borderRadius:10 }}>
+                <span style={{ fontWeight:600 }}>{label}</span>
+                <span style={{ color:'var(--text-muted)' }}>{value} · {formatPercent(value, total)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="card" style={{ padding:'18px 20px' }}>
+          <div style={{ fontWeight:700, fontSize:14, marginBottom:14 }}>Indicadores adicionais</div>
+          <div style={{ display:'grid', gap:10 }}>
+            {[
+              ['Salário médio bruto', rows.length ? fmt(rows.reduce((sum, r) => sum + r.salario, 0) / rows.length) : '—'],
+              ['Maior regime identificado', regimeStats[0] ? `${regimeStats[0][0]} (${formatPercent(regimeStats[0][1], total)})` : '—'],
+              ['Nacionalidade predominante', nationalityStats[0] ? `${nationalityStats[0][0]} (${formatPercent(nationalityStats[0][1], total)})` : '—'],
+              ['Contratos sem termo', contractStats.find(([label]) => label.toLowerCase().includes('sem termo')) ? formatPercent(contractStats.find(([label]) => label.toLowerCase().includes('sem termo'))[1], total) : '—'],
+            ].map(([label, value]) => (
+              <div key={label} style={{ display:'flex', justifyContent:'space-between', gap:12, padding:'10px 12px', border:'0.5px solid var(--border)', borderRadius:10, background:'var(--bg-app)' }}>
+                <span style={{ fontSize:12, color:'var(--text-muted)' }}>{label}</span>
+                <span style={{ fontWeight:700 }}>{value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="card" style={{ padding:'18px 20px', marginTop:14 }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10, marginBottom:14, flexWrap:'wrap' }}>
+          <div>
+            <div style={{ fontWeight:700, fontSize:14 }}>Perfis com remuneração mais elevada</div>
+            <div style={{ fontSize:12, color:'var(--text-muted)', marginTop:2 }}>Ajuda a contextualizar massa salarial e senioridade.</div>
+          </div>
+        </div>
+        <div className="card" style={{ padding:0, overflow:'hidden', boxShadow:'none', border:'0.5px solid var(--border)' }}>
+          <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
+            <thead>
+              <tr style={{ background:'var(--bg-app)', borderBottom:'0.5px solid var(--border)' }}>
+                {['Colaborador', 'Departamento', 'Salário', 'Regime', 'Assiduidade', 'Nacionalidade'].map(h => (
+                  <th key={h} style={{ padding:'9px 12px', textAlign:'left', fontSize:10, fontWeight:700, color:'var(--text-muted)', textTransform:'uppercase', letterSpacing:'0.04em' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {topSalary.map(({ perfil, extra, salario, regime, assiduidade }) => (
+                <tr key={perfil.id} style={{ borderBottom:'0.5px solid var(--border)' }}>
+                  <td style={{ padding:'10px 12px', fontWeight:600 }}>{perfil.nome}</td>
+                  <td style={{ padding:'10px 12px', color:'var(--text-muted)' }}>{DEPARTAMENTOS.find(d => d.id === perfil.departamento)?.label || perfil.departamento || '—'}</td>
+                  <td style={{ padding:'10px 12px', fontWeight:700 }}>{salario ? fmt(salario) : '—'}</td>
+                  <td style={{ padding:'10px 12px', color:'var(--text-muted)' }}>{regime}</td>
+                  <td style={{ padding:'10px 12px', color:'var(--text-muted)' }}>{formatPercentValue(assiduidade)}</td>
+                  <td style={{ padding:'10px 12px', color:'var(--text-muted)' }}>{extra.nacionalidade || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
@@ -1690,7 +2033,7 @@ const TABS = [
   { key: 'horarios',       label: '⏰ Horários',          Component: GestaoHorarios },
   { key: 'passagens',      label: '✈️ Passagens Aéreas',  Component: PassagensAereas },
   { key: 'feriados',       label: '📅 Feriados',          Component: Feriados },
-  { key: 'categorias',     label: '🏷 Categorias',         Component: Categorias },
+  { key: 'estatisticas',   label: '📊 Estatísticas',      Component: EstatisticasRH },
   { key: 'despesas',       label: '🧾 Despesas Internas',     Component: GestaoInterna },
 ];
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { exportTesourariaCompleto, exportTableToExcel, printTable } from '../utils/exportTesouraria';
 import { useAuth } from '../context/AuthContext';
@@ -11,16 +11,70 @@ import {
 } from '../context/NotificationsContext';
 import { FORNECEDORES_DATA } from './Fornecedores';
 import { CLIENTES_DATA } from './Clientes';
+import { PaymentDetailModal } from './Pagamentos';
 import { canEditModule } from '../context/PermissionsConfig';
 import { withDemoSeed } from '../utils/deliveryMode';
+import { loadProcessosEncomenda, syncProcessosEncomendaWithFaturas, updateProcessoEncomenda } from '../utils/encomendaWorkflow';
+import {
+  advanceFornecedorInvoiceWorkflow,
+  formatFornecedorPaymentDate,
+  getFornecedorInvoiceDocs,
+  getFornecedorWorkflowMemory,
+  nextActionLabelFornecedorPagamento,
+  rejectFornecedorInvoiceWorkflow,
+  returnFornecedorInvoiceWorkflow,
+  saveFornecedorInvoiceNote,
+  statusMetaFornecedorPagamento,
+} from '../utils/fornecedorPayments';
 
 const NOMES_MES = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+
+function mapProcessoEstadoPag(processo) {
+  if (processo.estadoFinanceiro === 'pago') return 'pago';
+  if (processo.estadoFinanceiro === 'autorizado') return 'autorizado';
+  if (processo.estadoFinanceiro === 'fatura_por_pagar') return 'pending-ms';
+  return 'previsto';
+}
+
+function buildPagamentoFromProcesso(processo, overrides = {}) {
+  return {
+    id: overrides.id || `proc-${processo.id}`,
+    processoId: processo.id,
+    origem: 'processo_encomenda',
+    fornecedor: processo.fornecedor,
+    fornId: processo.fornecedorId,
+    obra: processo.obraId,
+    categoria: processo.categoria || 'Encomenda',
+    nEncomenda: processo.encomendaId,
+    dataEncomenda: processo.documentoGeradoEm || processo.dataCriacao || '—',
+    valorEncomenda: overrides.valorEncomenda ?? processo.valorPrevisto,
+    valorParcialEncomenda: null,
+    nFatura: '—',
+    descricao: overrides.descricao || processo.descricaoResumo || (processo.fases || []).join(' · ') || 'Encomenda em preparação',
+    valor: overrides.valor ?? processo.valorPrevisto,
+    dataFatura: processo.documentoGeradoEm || processo.dataCriacao || '',
+    dataVenc: '—',
+    prevPagamento: processo.dataPrevistaPagamento || '',
+    estadoPag: overrides.estadoPag || mapProcessoEstadoPag(processo),
+    fluxoVal: overrides.fluxoVal || processo.estadoFinanceiro,
+    validDP: processo.isDraft ? 'Rascunho' : 'Pendente',
+    banco: '—',
+    comprovativo: null,
+    obsMD: processo.isJado ? `Bloqueada por ${processo.jadoId}` : '',
+    condPag: processo.condPagamento || '—',
+    dataPrevisaoPagamento: processo.dataPrevistaPagamento || '',
+    isDraftWorkflow: !!processo.isDraft,
+    isJadoWorkflow: !!processo.isJado,
+    workflowEstado: overrides.workflowEstado || processo.estadoWorkflow,
+  };
+}
 
 // ─── CARREGAR DADOS DO LOCALSTORAGE ───────────────────────────────────────────
 
 function loadPagamentos() {
   try {
     const raw = JSON.parse(localStorage.getItem('sis_faturas_forn') || '{}');
+    syncProcessosEncomendaWithFaturas(raw);
     const extras = JSON.parse(localStorage.getItem('sis_fornecedores_extra') || '[]');
     const todosForn = [...FORNECEDORES_DATA, ...extras];
     const result = [];
@@ -73,6 +127,11 @@ function loadPagamentos() {
           confirmado:   fat.estado === 'pago' || fat.estado === 'concluido' || fat.confirmado || false,
           dataConfirmacao: fat.dataPagamento || fat.dataConfirmacao || null,
           comprovativoPagamento: fat.comprovativoPagamento || null,
+          pdf:          fat.pdf || null,
+          pdfValidadoDP: fat.pdfValidadoDP || null,
+          doc51:        fat.doc51 || null,
+          notasPagamento: fat.notasPagamento || '',
+          workflowHistory: fat.workflowHistory || [],
           fornId:       forn.id,
           observacaoMS: fat.observacaoMS || '',
           dataValidacaoDP: fat.dataValidacaoDP || null,
@@ -87,7 +146,26 @@ function loadPagamentos() {
         });
       });
     });
-    return result.length > 0 ? result : PAGAMENTOS_DEFAULT;
+    const pagamentosPrevistos = loadProcessosEncomenda()
+      .flatMap((processo) => {
+        const residual = Math.max(0, Number(processo.valorPrevisto || 0) - Number(processo.totalFaturado || 0));
+        if (processo.estadoFinanceiro === 'pago') return [];
+        if ((processo.faturaIds || []).length === 0) return [buildPagamentoFromProcesso(processo)];
+        if (residual > 0.01) {
+          return [buildPagamentoFromProcesso(processo, {
+            id: `proc-${processo.id}-remanescente`,
+            valor: residual,
+            valorEncomenda: processo.valorPrevisto,
+            descricao: `${processo.descricaoResumo || 'Encomenda'} · Remanescente por faturar`,
+            estadoPag: 'previsto',
+            fluxoVal: 'pagamento_previsto',
+            workflowEstado: processo.estadoWorkflow,
+          })];
+        }
+        return [];
+      });
+    const merged = [...pagamentosPrevistos, ...result];
+    return merged.length > 0 ? merged : PAGAMENTOS_DEFAULT;
   } catch { return PAGAMENTOS_DEFAULT; }
 }
 
@@ -248,10 +326,12 @@ function getPerfisLista() {
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 const fmt = v => (v < 0 ? '−' : '') + '€\u00a0' + Math.abs(v).toLocaleString('pt-PT');
+const actorName = (user) => user?.nome || user?.initials || user?.id || 'SIS';
 
 const CATS_FORN = ['Todas','Estruturas metálicas','Instalações elétricas','Subempreitada geral','AVAC e climatização','Betão e prefabricados','Isolamentos e impermeabilização','Serralharia','Carpintaria','Pintura','Outro'];
 
 const PAG_EST = {
+  'previsto':   { label: 'Previsto',   cls: 'badge-n' },
   'pago':       { label: 'Pago',       cls: 'badge-s' },
   'autorizado': { label: 'Autorizado', cls: 'badge-s' },
   'pending-ms': { label: 'Aguarda MS', cls: 'badge-w' },
@@ -884,6 +964,7 @@ export default function TesourariaPage() {
   const [periodoInicio, setPeriodoInicio] = useState(currentMonthStart);
   const [periodoFim, setPeriodoFim] = useState(currentMonthEnd);
   const [pagamentos, setPagamentos]   = useState(loadPagamentos);
+  const [selectedPagamentoForn, setSelectedPagamentoForn] = useState(null);
   const [recebimentos, setRecebimentos] = useState(loadRecebimentos);
   const [obsModal, setObsModal]       = useState(null);
   // ── Estado de simulação global ───────────────────────────────────────────────
@@ -936,6 +1017,52 @@ export default function TesourariaPage() {
     }
   };
 
+  const actualizarPrevPagamento = (pagamentoId, novaData) => {
+    const alvo = pagamentos.find(p => p.id === pagamentoId);
+    if (!alvo) return;
+    setPagamentos(prev => prev.map(p => p.id === pagamentoId ? { ...p, prevPagamento: novaData, dataPrevisaoPagamento: novaData } : p));
+    if (alvo.processoId) {
+      updateProcessoEncomenda(alvo.processoId, { dataPrevistaPagamento: novaData });
+      return;
+    }
+    if (alvo.fornId) {
+      saveFaturaForn(alvo.fornId, pagamentoId, { dataPrevisaoPagamento: novaData, venc: novaData });
+    }
+  };
+
+  const syncSelectedPagamento = (updated) => {
+    if (!updated || !selectedPagamentoForn || selectedPagamentoForn.id !== updated.id) return;
+    setSelectedPagamentoForn((prev) => prev ? { ...prev, ...updated, estadoPag: updated.estado } : prev);
+  };
+
+  const saveSelectedPagamentoNote = (item, note) => {
+    const updated = saveFornecedorInvoiceNote(item.fornId, item.id, note, actorName(user));
+    if (!updated) return;
+    setPagamentos((prev) => prev.map((x) => x.id === item.id ? { ...x, ...updated, estadoPag: updated.estado } : x));
+    syncSelectedPagamento(updated);
+  };
+
+  const advanceSelectedPagamento = (item) => {
+    const updated = advanceFornecedorInvoiceWorkflow(item.fornId, item.id, actorName(user));
+    if (!updated) return;
+    setPagamentos((prev) => prev.map((x) => x.id === item.id ? { ...x, ...updated, estadoPag: updated.estado } : x));
+    syncSelectedPagamento(updated);
+  };
+
+  const returnSelectedPagamento = (item) => {
+    const updated = returnFornecedorInvoiceWorkflow(item.fornId, item.id, actorName(user));
+    if (!updated) return;
+    setPagamentos((prev) => prev.map((x) => x.id === item.id ? { ...x, ...updated, estadoPag: updated.estado } : x));
+    syncSelectedPagamento(updated);
+  };
+
+  const rejectSelectedPagamento = (item) => {
+    const updated = rejectFornecedorInvoiceWorkflow(item.fornId, item.id, actorName(user));
+    if (!updated) return;
+    setPagamentos((prev) => prev.map((x) => x.id === item.id ? { ...x, ...updated, estadoPag: updated.estado } : x));
+    syncSelectedPagamento(updated);
+  };
+
   const temSimulacao = pendingChanges.length > 0;
   const periodoActivoLabel = !historicoAtivo
     ? (vista === 'anual'
@@ -959,10 +1086,22 @@ export default function TesourariaPage() {
     const onStorage = (e) => {
       if (e.key === 'sis_faturas_forn') setPagamentos(loadPagamentos());
       if (e.key === 'sis_faturas_cli')  setRecebimentos(loadRecebimentos());
+      if (e.key === 'sis_processos_encomenda') setPagamentos(loadPagamentos());
     };
+    const onProcessosUpdated = () => setPagamentos(loadPagamentos());
     window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
+    window.addEventListener('sis_processos_encomenda_updated', onProcessosUpdated);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('sis_processos_encomenda_updated', onProcessosUpdated);
+    };
   }, []); // eslint-disable-line
+
+  useEffect(() => {
+    if (!selectedPagamentoForn) return;
+    const refreshed = pagamentos.find((item) => item.id === selectedPagamentoForn.id && item.fornId === selectedPagamentoForn.fornId);
+    if (refreshed && refreshed !== selectedPagamentoForn) setSelectedPagamentoForn(refreshed);
+  }, [pagamentos, selectedPagamentoForn]);
 
   // Motor de alertas automáticos: corre ao montar e quando os dados mudam
   useEffect(() => {
@@ -1081,7 +1220,8 @@ export default function TesourariaPage() {
   };
 
   const filtrar = (lista, campoData) => {
-    return lista.filter(item => {
+    const safeLista = Array.isArray(lista) ? lista : [];
+    return safeLista.filter(item => {
       const dataPrincipal = item.prevPagamento || item.prevRecebimento || item[campoData] || '';
       if (usaFiltroIntervalo) {
         const dCompleta = parseDataCompleta(dataPrincipal, anoAtivo);
@@ -1172,6 +1312,26 @@ export default function TesourariaPage() {
           inicial={obsModal.texto}
           onClose={() => setObsModal(null)}
           onSave={guardarObs}
+        />
+      )}
+
+      {selectedPagamentoForn && selectedPagamentoForn.origem !== 'processo_encomenda' && (
+        <PaymentDetailModal
+          item={{
+            ...selectedPagamentoForn,
+            estado: selectedPagamentoForn.estadoPag,
+            fornecedorId: selectedPagamentoForn.fornId,
+            fornecedorNome: selectedPagamentoForn.fornecedor,
+            fornecedorCategoria: selectedPagamentoForn.categoria,
+            data: selectedPagamentoForn.dataFatura,
+            venc: selectedPagamentoForn.dataVenc,
+          }}
+          onClose={() => setSelectedPagamentoForn(null)}
+          onValidate={() => advanceSelectedPagamento(selectedPagamentoForn)}
+          onReturn={() => returnSelectedPagamento(selectedPagamentoForn)}
+          onReject={() => rejectSelectedPagamento(selectedPagamentoForn)}
+          onSaveNote={(note) => saveSelectedPagamentoNote(selectedPagamentoForn, note)}
+          canFinalize={selectedPagamentoForn.estadoPag === 'autorizado'}
         />
       )}
 
@@ -1382,16 +1542,6 @@ export default function TesourariaPage() {
             subCls: Math.abs(desvio) > 10 ? 'badge-d' : 'badge-w',
             valueColor: desvio < 0 ? 'var(--color-warning)' : 'var(--color-success)',
           },
-          {
-            label: 'Fat. s/ Validação DP',
-            value: String(pagamentos.filter(p => p.validDP !== 'Validada' && p.estadoPag !== 'pago').length),
-            sub: pagamentos.filter(p => p.validDP !== 'Validada' && p.estadoPag !== 'pago').length > 0
-              ? `${fmt(pagamentos.filter(p => p.validDP !== 'Validada' && p.estadoPag !== 'pago').reduce((s,p)=>s+p.valor,0))}`
-              : 'Todas validadas',
-            subCls: pagamentos.filter(p => p.validDP !== 'Validada' && p.estadoPag !== 'pago').length > 0 ? 'badge-d' : 'badge-s',
-            valueColor: pagamentos.filter(p => p.validDP !== 'Validada' && p.estadoPag !== 'pago').length > 0 ? 'var(--color-danger)' : 'var(--color-success)',
-            onClick: () => setTab('pagamentos'),
-          },
         ].map(k => (
           <div key={k.label} className="kpi-card" onClick={k.onClick} style={{ cursor: k.onClick ? 'pointer' : 'default', transition: 'box-shadow .15s' }}
             onMouseEnter={e => { if (k.onClick) e.currentTarget.style.boxShadow = '0 4px 16px rgba(0,0,0,0.1)'; }}
@@ -1459,7 +1609,7 @@ export default function TesourariaPage() {
             <div style={{ width: 1, height: 20, background: 'var(--border)', flexShrink: 0 }} />
             <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
               <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', flexShrink: 0 }}>Estado</span>
-              {['Todos','pending-dp','pending-ms','autorizado','pago'].map(v => (
+              {['Todos','previsto','pending-dp','pending-ms','autorizado','pago'].map(v => (
                 <button key={v} onClick={() => setFiltroEstadoPag(v)} style={{ fontFamily: 'var(--font-body)', fontSize: 11, padding: '4px 12px', borderRadius: 20, border: '0.5px solid', cursor: 'pointer', transition: 'all .15s', whiteSpace: 'nowrap', borderColor: filtroEstadoPag === v ? 'var(--brand-primary)' : 'var(--border)', background: filtroEstadoPag === v ? 'var(--brand-primary)' : 'var(--bg-card)', color: filtroEstadoPag === v ? '#fff' : 'var(--text-secondary)' }}>{v === 'Todos' ? 'Todos' : PAG_EST[v]?.label || v}</button>
               ))}
             </div>
@@ -1478,17 +1628,13 @@ export default function TesourariaPage() {
             <table id="tes-tabela-pagamentos" style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
                 <tr style={{ background: 'var(--bg-app)', position: 'sticky', top: 0, zIndex: 4 }}>
-                  {vista === 'quinzenal' && <th style={{ padding: '8px 10px', fontWeight: 600, fontSize: 11, color: 'var(--text-secondary)', borderBottom: '1px solid var(--border)', borderRight: '0.5px solid var(--border)', whiteSpace: 'nowrap', minWidth: 80, textTransform: 'uppercase', letterSpacing: '0.03em', background: 'var(--bg-app)' }}>Quinzena</th>}
                   {[
-                    { label: 'Fornecedor', w: 160 }, { label: 'Obra/Projeto', w: 90 },
-                    { label: 'Categoria', w: 150 }, { label: 'Nº Encomenda', w: 120 },
-                    { label: 'Data Encomenda', w: 110 }, { label: 'Val. Total Enc.', w: 120, right: true },
-                    { label: 'Val. Parcial Enc.', w: 120, right: true }, { label: 'Nº Fatura', w: 120 },
-                    { label: 'Descrição', w: 160 }, { label: 'Valor Fatura', w: 110, right: true },
-                    { label: 'Data Fatura', w: 95 }, { label: 'Vencimento', w: 95 },
-                    { label: 'Cond. Pagamento', w: 110 }, { label: 'Prev. Pagamento', w: 130 },
-                    { label: 'Banco', w: 110 },
-                    { label: 'Ações', w: 220 },
+                    { label: 'Data Sit.', w: 96 },
+                    { label: 'Doc.', w: 210 },
+                    { label: 'Fornecedor / Descrição', w: 320 },
+                    { label: 'Valor', w: 130, right: true },
+                    { label: 'Info', w: 220 },
+                    { label: 'Ações', w: 170 },
                   ].map(col => (
                     <th key={col.label} style={{ padding: '8px 10px', textAlign: col.right ? 'right' : 'left', fontWeight: 600, fontSize: 11, color: 'var(--text-secondary)', borderBottom: '1px solid var(--border)', borderRight: '0.5px solid var(--border)', whiteSpace: 'nowrap', minWidth: col.w, textTransform: 'uppercase', letterSpacing: '0.03em', background: 'var(--bg-app)' }}>{col.label}</th>
                   ))}
@@ -1497,104 +1643,113 @@ export default function TesourariaPage() {
               <tbody>
                 {[...pagsFiltrados].sort((a,b) => { const da=parseMesDia(a.dataFatura||''),db=parseMesDia(b.dataFatura||''); return (da?.dia||0)-(db?.dia||0); }).map((p, i) => {
                   const vencida = p.estadoPag !== 'pago' && p.dataVenc && p.dataVenc !== '—';
-                  const rowBg = p.estadoPag==='pago' ? 'rgba(46,125,82,0.10)' : p.estadoPag==='vencida' ? 'rgba(184,50,50,0.06)' : i%2===0 ? 'var(--bg-card)' : 'rgba(0,0,0,0.018)';
-                  const rowBorder = p.estadoPag==='pago' ? '3px solid var(--color-success)' : p.estadoPag==='vencida' ? '3px solid var(--color-danger)' : 'none';
-                  const dia = parseMesDia(p.dataFatura||'')?.dia||0;
-                  const quinzena = dia>0&&dia<=15 ? `1ª quinzena` : dia>15 ? `2ª quinzena` : '—';
+                  const rowBg = p.origem === 'processo_encomenda'
+                    ? 'rgba(28,58,94,0.045)'
+                    : p.estadoPag==='pago'
+                      ? 'rgba(46,125,82,0.10)'
+                      : p.estadoPag==='vencida'
+                        ? 'rgba(184,50,50,0.06)'
+                        : i%2===0
+                          ? 'var(--bg-card)'
+                          : 'rgba(0,0,0,0.018)';
+                  const rowBorder = p.origem === 'processo_encomenda'
+                    ? '3px solid rgba(28,58,94,0.28)'
+                    : p.estadoPag==='pago'
+                      ? '3px solid var(--color-success)'
+                      : p.estadoPag==='vencida'
+                        ? '3px solid var(--color-danger)'
+                        : 'none';
                   const TD = (ex={}) => ({ padding:'7px 10px', borderBottom:'0.5px solid var(--border)', borderRight:'0.5px solid var(--border)', ...ex });
-                  const TDE = { padding:'4px 6px', borderBottom:'0.5px solid var(--border)', borderRight:'0.5px solid var(--border)' };
-                  const IS = { width:'100%', fontFamily:'var(--font-body)', fontSize:11, color:'var(--text-muted)', background:'transparent', border:'none', outline:'none', padding:'3px 4px', borderRadius:4 };
-                  const onFI = e => { e.target.style.background='var(--bg-card)'; e.target.style.border='1px solid var(--brand-primary)'; e.target.style.color='var(--text-primary)'; };
-                  const onFO = e => { e.target.style.background='transparent'; e.target.style.border='none'; e.target.style.color='var(--text-muted)'; };
+                  const docs = p.origem === 'processo_encomenda' ? [] : getFornecedorInvoiceDocs({
+                    pdf: p.pdf,
+                    pdfValidadoDP: p.pdfValidadoDP,
+                    comprovativoPagamento: p.comprovativoPagamento || (p.comprovativo ? { name: p.comprovativo } : null),
+                    doc51: p.doc51,
+                  });
+                  const memory = p.origem === 'processo_encomenda' ? [] : getFornecedorWorkflowMemory(p);
                   return (
                     <tr key={p.id} style={{ background: rowBg }}>
-                      {vista==='quinzenal' && <td style={{ ...TD(), whiteSpace:'nowrap', borderLeft:rowBorder }}><span className={`badge ${quinzena.startsWith('1')?'badge-i':'badge-n'}`}>{quinzena}</span></td>}
-                      <td style={TD({ fontWeight:500, whiteSpace:'nowrap', borderLeft:vista!=='quinzenal'?rowBorder:undefined })}>
-                        <span onClick={() => navigate('/fornecedores', { state: { abrirFornecedor: p.fornId } })}
-                          style={{ cursor:'pointer', color:'var(--brand-primary)', textDecoration:'underline', textDecorationStyle:'dotted' }}
-                          title="Abrir fornecedor">
-                          {p.fornecedor}
-                        </span>
-                      </td>
-                      <td style={TD()}><span className="badge badge-n">{p.obra}</span></td>
-                      <td style={TDE}>
-                        <select value={p.categoria||''} onChange={e=>setPagamentos(prev=>prev.map(x=>x.id===p.id?{...x,categoria:e.target.value}:x))} style={{...IS,cursor:'pointer'}} onFocus={e=>{e.target.style.background='var(--bg-card)';e.target.style.border='1px solid var(--brand-primary)';}} onBlur={e=>{e.target.style.background='transparent';e.target.style.border='none';}}>
-                          <option value="">— seleccionar —</option>
-                          {CATS_FORN.slice(1).map(c=><option key={c} value={c}>{c}</option>)}
-                        </select>
-                      </td>
-                      <td style={TD({ fontFamily:'var(--font-mono)', fontSize:11, color:'var(--text-muted)' })}>{p.nEncomenda||'—'}</td>
-                      <td style={TD({ color:'var(--text-muted)', whiteSpace:'nowrap' })}>{p.dataEncomenda||'—'}</td>
-                      <td style={TD({ textAlign:'right', color:'var(--text-muted)' })}>{p.valorEncomenda?fmt(p.valorEncomenda):'—'}</td>
-                      <td style={TDE}><input key={p.id+'_vpe'} defaultValue={p.valorParcialEncomenda||''} placeholder="—" style={{...IS,textAlign:'right',fontFamily:'var(--font-mono)'}} onFocus={onFI} onBlur={e=>{const v=parseFloat(e.target.value.replace(/[^0-9.,]/g,'').replace(',','.'))||null;setPagamentos(prev=>prev.map(x=>x.id===p.id?{...x,valorParcialEncomenda:v}:x));onFO(e);}} onKeyDown={e=>{if(e.key==='Enter')e.target.blur();}}/></td>
+                      <td style={TD({ whiteSpace:'nowrap', borderLeft:rowBorder, color:'var(--text-muted)' })}>{formatFornecedorPaymentDate(p.dataFatura || p.dataEncomenda)}</td>
                       <td style={TD({ fontFamily:'var(--font-mono)', fontSize:11 })}>
-                        <span onClick={() => navigate('/fornecedores', { state: { abrirFaturaForn: { faturaId: p.id, fornecedorId: p.fornId } } })}
+                        <span onClick={() => {
+                          if (p.origem === 'processo_encomenda') {
+                            navigate('/fornecedores', { state: { abrirFaturaForn: { faturaId: p.id, fornecedorId: p.fornId } } });
+                            return;
+                          }
+                          setSelectedPagamentoForn(p);
+                        }}
                           style={{ cursor:'pointer', color:'var(--brand-primary)', textDecoration:'underline', textDecorationStyle:'dotted' }}
                           title="Abrir fatura">
-                          {p.nFatura}
+                          {p.nFatura || p.id}
                         </span>
+                        <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginTop:6 }}>
+                          {docs.map(doc => (
+                            <button key={doc.key} className="btn btn-sm" onClick={() => downloadFornecedorPaymentDoc(doc)}>{doc.label}</button>
+                          ))}
+                        </div>
                       </td>
-                      <td style={TD({ color:'var(--text-secondary)', maxWidth:160, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' })}>{p.descricao||'—'}</td>
-                      <td style={TD({ textAlign:'right', fontWeight:600 })}>{fmt(p.valor)}</td>
-                      <td style={TD({ color:'var(--text-muted)', whiteSpace:'nowrap' })}>{p.dataFatura||'—'}</td>
-                      <td style={TD({ color:vencida?'var(--color-danger)':'var(--text-muted)', whiteSpace:'nowrap', fontWeight:vencida?600:400 })}>{p.dataVenc||'—'}{vencida&&' ⚠'}</td>
-                      <td style={TD({ color:'var(--text-muted)' })}>{p.condPag||'—'}</td>
-                      <td style={TDE}>
-                        {podeEditarDataPrev ? (
-                          <input type="date"
-                            value={p.prevPagamento&&/^\d{4}-\d{2}-\d{2}$/.test(p.prevPagamento)?p.prevPagamento:''}
-                            onChange={e => {
-                              const val = e.target.value;
-                              setPagamentos(prev => prev.map(x => x.id===p.id ? {...x, prevPagamento:val} : x));
-                              saveFaturaForn(p.fornId, p.id, { dataPrevisaoPagamento: val });
-                            }}
-                            style={{...IS, cursor:'pointer'}}
-                            onFocus={e=>{e.target.style.background='var(--bg-card)';e.target.style.border='1px solid var(--brand-accent)';}}
-                            onBlur={e=>{e.target.style.background='transparent';e.target.style.border='none';}}
-                          />
+                      <td style={TD({ minWidth: 280 })}>
+                        <div style={{ fontWeight:600 }}>
+                          <span onClick={() => navigate('/fornecedores', { state: { abrirFornecedor: p.fornId } })}
+                            style={{ cursor:'pointer', color:'var(--brand-primary)', textDecoration:'underline', textDecorationStyle:'dotted' }}>
+                            {p.fornecedor}
+                          </span>
+                        </div>
+                        <div style={{ fontSize:12, color:'var(--text-secondary)', marginTop:3 }}>{p.descricao || 'Sem descrição'}</div>
+                        <div style={{ fontSize:11, color:'var(--text-muted)', marginTop:5 }}>
+                          {p.obra || 'Sem obra'} · {p.categoria || '—'} · Prev. {formatFornecedorPaymentDate(p.prevPagamento || p.dataPrevisaoPagamento)}
+                        </div>
+                      </td>
+                      <td style={TD({ textAlign:'right', minWidth:130 })}>
+                        <div style={{ fontWeight:700 }}>{fmt(p.valor)}</div>
+                        <div style={{ fontSize:12, color:vencida?'var(--color-danger)':'var(--text-muted)', marginTop:4 }}>
+                          Venc. {formatFornecedorPaymentDate(p.dataVenc)}{vencida ? ' ⚠' : ''}
+                        </div>
+                      </td>
+                      <td style={TD({ minWidth:220 })}>
+                        {p.origem === 'processo_encomenda' ? (
+                          <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+                            <span className={`badge ${p.isJadoWorkflow ? 'badge-i' : p.isDraftWorkflow ? 'badge-n' : 'badge-w'}`}>
+                              {p.isJadoWorkflow ? 'Draft JADO' : p.isDraftWorkflow ? 'Draft' : 'Emitida'}
+                            </span>
+                            <div style={{ fontSize:12, color:'var(--text-muted)' }}>Pagamento previsto vindo da encomenda.</div>
+                          </div>
                         ) : (
-                          <span style={{fontSize:12, color:'var(--text-muted)', padding:'0 4px'}}>{p.prevPagamento||'—'}</span>
+                          <div>
+                            <div><span className={`badge ${statusMetaFornecedorPagamento(p.estadoPag).cls}`}>{statusMetaFornecedorPagamento(p.estadoPag).label}</span></div>
+                            <div style={{ fontSize:12, marginTop:6, color:'var(--text-secondary)' }}>{memory[0]?.label || 'Sem memória'}</div>
+                            <div style={{ fontSize:11, color:'var(--text-muted)', marginTop:4 }}>{p.notasPagamento ? p.notasPagamento.slice(0, 60) : 'Sem observações registadas'}</div>
+                          </div>
                         )}
                       </td>
-                      <td style={TDE}>
-                        <select value={p.banco||''} onChange={e=>setPagamentos(prev=>prev.map(x=>x.id===p.id?{...x,banco:e.target.value}:x))} style={{...IS,cursor:'pointer'}} onFocus={e=>{e.target.style.background='var(--bg-card)';e.target.style.border='1px solid var(--brand-primary)';}} onBlur={e=>{e.target.style.background='transparent';e.target.style.border='none';}}>
-                          <option value="">— banco —</option>
-                          {['CGD','BPI','Novo Banco','Santander','BCP','BIC','Montepio','Outro'].map(b=><option key={b} value={b}>{b}</option>)}
-                        </select>
-                      </td>
-                      <td style={{ padding:'6px 8px', borderBottom:'0.5px solid var(--border)', minWidth:220 }}>
-                        <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
-                          <FluxoValidacaoForn
-                            p={p}
-                            user={user}
-                            addNotif={addNotif}
-                            onUpdate={campos => {
-                              saveFaturaForn(p.fornId, p.id, campos);
-                              setPagamentos(prev => prev.map(x => x.id===p.id ? {...x, ...campos,
-                                fluxoVal: campos.estado==='pago'||campos.estado==='concluido' ? 'autorizado'
-                                  : campos.estado==='autorizado' ? 'autorizado'
-                                  : campos.estado==='pending-ms' ? 'pendente_ms'
-                                  : campos.estado==='standby-lg'||campos.estado==='pending-lg' ? 'pendente_lg'
-                                  : 'pendente_dp',
-                                confirmado: campos.estado==='pago'||campos.estado==='concluido'||false,
-                              } : x));
-                            }}
-                          />
-                          <ConfirmarLiquidacao
-                            id={p.id} tipo="forn"
-                            estadoFluxo={p.fluxoVal||'pendente_dp'}
-                            confirmado={p.confirmado}
-                            dataConfirmacao={p.dataConfirmacao}
-                            comprovativo={p.comprovativo?.name || p.comprovativo}
-                            user={user}
-                            onConfirmar={({data, comprovativo:comp}) => {
-                              const campos = { estado:'pago', dataPagamento:data, confirmado:true, dataConfirmacao:data, comprovativoPagamento: comp ? {name:comp} : p.comprovativoPagamento };
-                              saveFaturaForn(p.fornId, p.id, campos);
-                              setPagamentos(prev => prev.map(x => x.id===p.id ? {...x, ...campos, estadoPag:'pago', fluxoVal:'autorizado', comprovativo:comp||x.comprovativo} : x));
-                              addNotif({ tipo:'confirmar_emissao', icon:'💶', titulo:`Pagamento registado — adicionar Doc. 51`, sub:`${p.fornecedor} · ${p.nFatura} · Pago em ${data}`, path:'/fornecedores', destinatario:'ca', meta:{faturaId:p.id, fornecedorNome:p.fornecedor} });
-                            }}
-                          />
-                        </div>
+                      <td style={{ ...TD(), minWidth:170 }}>
+                        {p.origem === 'processo_encomenda' ? (
+                          <button className="btn btn-sm" onClick={() => navigate(`/obras/${p.obra}`)}>Abrir obra</button>
+                        ) : (
+                          <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+                            <button className="btn btn-sm" title="Abrir detalhes" onClick={() => setSelectedPagamentoForn(p)}>i</button>
+                            <button className="btn btn-sm" title="Nota rápida" onClick={() => {
+                              const nextNote = window.prompt('Escreve a nota ou observação para esta fatura:', p.notasPagamento || '');
+                              if (nextNote === null) return;
+                              const updated = saveFornecedorInvoiceNote(p.fornId, p.id, nextNote, actorName(user));
+                              setPagamentos(prev => prev.map(x => x.id === p.id ? { ...x, ...updated, estadoPag: updated.estado } : x));
+                            }}>✎</button>
+                            <button className="btn btn-sm" title="Mandar para a pessoa anterior" onClick={() => {
+                              const updated = returnFornecedorInvoiceWorkflow(p.fornId, p.id, actorName(user));
+                              setPagamentos(prev => prev.map(x => x.id === p.id ? { ...x, ...updated, estadoPag: updated.estado } : x));
+                            }}>↩</button>
+                            <button className="btn btn-sm" style={{ color:'var(--color-danger)', borderColor:'var(--color-danger)' }} title="Não validar" onClick={() => {
+                              const updated = rejectFornecedorInvoiceWorkflow(p.fornId, p.id, actorName(user));
+                              setPagamentos(prev => prev.map(x => x.id === p.id ? { ...x, ...updated, estadoPag: updated.estado } : x));
+                            }}>✕</button>
+                            {!['pago','concluido'].includes(p.estadoPag) && (
+                              <button className="btn btn-sm btn-primary" title={nextActionLabelFornecedorPagamento(p.estadoPag)} onClick={() => {
+                                const updated = advanceFornecedorInvoiceWorkflow(p.fornId, p.id, actorName(user));
+                                setPagamentos(prev => prev.map(x => x.id === p.id ? { ...x, ...updated, estadoPag: updated.estado } : x));
+                              }}>✓</button>
+                            )}
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );
@@ -1604,7 +1759,7 @@ export default function TesourariaPage() {
           </div>
           {/* Rodapé */}
           <div style={{ padding:'8px 16px', borderTop:'0.5px solid var(--border)', display:'flex', gap:20, fontSize:12, background:'var(--bg-app)', flexShrink:0 }}>
-            {[{label:'Aguarda DP',val:pagsFiltrados.filter(p=>p.estadoPag==='pending-dp').length,cls:'badge-i'},{label:'Aguarda MS',val:pagsFiltrados.filter(p=>p.estadoPag==='pending-ms').length,cls:'badge-w'},{label:'Autorizado',val:pagsFiltrados.filter(p=>p.estadoPag==='autorizado').length,cls:'badge-s'},{label:'Pago',val:pagsFiltrados.filter(p=>p.estadoPag==='pago').length,cls:'badge-s'}].map(s=>(
+            {[{label:'Previsto',val:pagsFiltrados.filter(p=>p.estadoPag==='previsto').length,cls:'badge-n'},{label:'Aguarda DP',val:pagsFiltrados.filter(p=>p.estadoPag==='pending-dp').length,cls:'badge-i'},{label:'Aguarda MS',val:pagsFiltrados.filter(p=>p.estadoPag==='pending-ms').length,cls:'badge-w'},{label:'Autorizado',val:pagsFiltrados.filter(p=>p.estadoPag==='autorizado').length,cls:'badge-s'},{label:'Pago',val:pagsFiltrados.filter(p=>p.estadoPag==='pago').length,cls:'badge-s'}].map(s=>(
               <span key={s.label} style={{ color:'var(--text-muted)' }}>{s.label}: <span className={`badge ${s.cls}`}>{s.val}</span></span>
             ))}
             <span style={{ marginLeft:'auto', color:'var(--text-muted)' }}>Total em aberto: <strong style={{ color:'var(--color-warning)' }}>{fmt(pagsFiltrados.filter(p=>p.estadoPag!=='pago').reduce((s,p)=>s+p.valor,0))}</strong></span>
@@ -1752,7 +1907,7 @@ export default function TesourariaPage() {
       )}
 
       {/* ── TAB RESUMO ── */}
-      {tab === 'resumo' && <ResumoGrelha pagamentos={pagamentos} recebimentos={recebimentos} anoAtivo={anoAtivo} dadosSimulados={dadosSimulados} temSimulacao={temSimulacao} vistaGlobal={vista} mesGlobal={mesAtivo} quinzenaGlobal={quinzenaAtiva} canEditPrevDatas={podeEditarDataPrev} onUpdateRecebimentoPrev={actualizarPrevRecebimento} />}
+      {tab === 'resumo' && <ResumoGrelha pagamentos={pagamentos} recebimentos={recebimentos} anoAtivo={anoAtivo} dadosSimulados={dadosSimulados} temSimulacao={temSimulacao} vistaGlobal={vista} mesGlobal={mesAtivo} quinzenaGlobal={quinzenaAtiva} canEditPrevDatas={podeEditarDataPrev} onUpdateRecebimentoPrev={actualizarPrevRecebimento} onUpdatePagamentoPrev={actualizarPrevPagamento} />}
 
       {/* ── TABS DETALHE MANUAL ── */}
       {tab === 'financiamentos' && (
@@ -1888,19 +2043,28 @@ function DetalheManualGrelha({ chave, titulo, descricao, colunas, anoAtivo, peri
     const d = new Date(`${value}T00:00:00`);
     return Number.isNaN(d.getTime()) ? null : d;
   };
-  const rangeStartRaw = parseIsoDate(periodoInicio) || new Date((anoAtivo || 2026), 0, 1);
-  const rangeEndRaw = parseIsoDate(periodoFim) || new Date((anoAtivo || 2026), 11, 31);
+  const safeAnoAtivo = Number.isFinite(Number(anoAtivo)) ? Number(anoAtivo) : 2026;
+  const rangeStartRaw = parseIsoDate(periodoInicio) || new Date(safeAnoAtivo, 0, 1);
+  const rangeEndRaw = parseIsoDate(periodoFim) || new Date(safeAnoAtivo, 11, 31);
   const rangeStart = rangeStartRaw <= rangeEndRaw ? rangeStartRaw : rangeEndRaw;
   const rangeEnd = rangeStartRaw <= rangeEndRaw ? rangeEndRaw : rangeStartRaw;
-  const timelineMeses = [];
-  let cursor = new Date(rangeStart.getFullYear(), rangeStart.getMonth(), 1);
-  const finalCursor = new Date(rangeEnd.getFullYear(), rangeEnd.getMonth(), 1);
-  while (cursor <= finalCursor) {
-    timelineMeses.push({ ano: cursor.getFullYear(), mi: cursor.getMonth(), label: NOMES_MES[cursor.getMonth()] });
-    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
-  }
-  const timelineYears = [...new Set(timelineMeses.map(m => m.ano))];
-  const anoReferencia = timelineMeses[0]?.ano || anoAtivo || 2026;
+  const timelineMeses = useMemo(() => {
+    const meses = [];
+    let cursor = new Date(rangeStart.getFullYear(), rangeStart.getMonth(), 1);
+    const finalCursor = new Date(rangeEnd.getFullYear(), rangeEnd.getMonth(), 1);
+    while (cursor <= finalCursor) {
+      meses.push({ ano: cursor.getFullYear(), mi: cursor.getMonth(), label: NOMES_MES[cursor.getMonth()] });
+      cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+    }
+    return meses;
+  }, [rangeStart.getTime(), rangeEnd.getTime()]);
+  const timelineYears = useMemo(
+    () => [...new Set(timelineMeses.map(m => m.ano))],
+    [timelineMeses]
+  );
+  const timelineYearsKey = timelineYears.join('|');
+  const colunasKey = colunas.map(c => `${c.key}:${c.label}:${c.tipo}:${c.auto ? 1 : 0}`).join('|');
+  const anoReferencia = timelineMeses[0]?.ano || safeAnoAtivo || 2026;
 
   // ── Grupos & itens ───────────────────────────────────────────────────────────
   // Os grupos base vêm das colunas. Os itens de cada grupo vêm do localStorage.
@@ -1910,27 +2074,38 @@ function DetalheManualGrelha({ chave, titulo, descricao, colunas, anoAtivo, peri
       .find(entry => entry && entry.length > 0);
     const colunaKeys = colunas.map(c => c.key);
     if (saved && saved.length > 0) {
-      const savedKeys = saved.map(g => g.key);
+      const safeSaved = saved.map((g) => ({
+        key: g?.key,
+        label: g?.label || g?.key || 'Grupo',
+        tipo: g?.tipo || 'saida',
+        auto: !!g?.auto,
+        itens: Array.isArray(g?.itens) ? g.itens : [],
+      }));
+      const savedKeys = safeSaved.map(g => g.key);
       const match = colunaKeys.length === savedKeys.length &&
         colunaKeys.every(k => savedKeys.includes(k));
-      if (match) return saved;
+      if (match) return safeSaved;
       // Colunas mudaram — reconstrói preservando itens onde a chave ainda existe
       return colunas.map(c => {
-        const existing = saved.find(g => g.key === c.key);
+        const existing = safeSaved.find(g => g.key === c.key);
         return { key: c.key, label: c.label, tipo: c.tipo, auto: c.auto, itens: existing?.itens || [] };
       });
     }
     return colunas.map(c => ({ key: c.key, label: c.label, tipo: c.tipo, auto: c.auto, itens: [] }));
   };
-  const grupos = getGrupos();
+  const grupos = useMemo(() => getGrupos(), [dados, chave, colunasKey, timelineYearsKey, anoReferencia]);
 
   useEffect(() => {
     setExpandido(prev => {
+      let changed = false;
       const next = { ...prev };
       grupos.forEach(g => {
-        if (g.auto && next[g.key] === undefined) next[g.key] = true;
+        if (g.auto && next[g.key] === undefined) {
+          next[g.key] = true;
+          changed = true;
+        }
       });
-      return next;
+      return changed ? next : prev;
     });
   }, [grupos]);
 
@@ -2000,7 +2175,7 @@ function DetalheManualGrelha({ chave, titulo, descricao, colunas, anoAtivo, peri
 
   const removerItem = (grupoKey, itemKey) => {
     const newGrupos = grupos.map(g => g.key === grupoKey
-      ? { ...g, itens: g.itens.filter(i => i.key !== itemKey) }
+      ? { ...g, itens: (g.itens || []).filter(i => i.key !== itemKey) }
       : g
     );
     saveGrupos(newGrupos);
@@ -2009,7 +2184,7 @@ function DetalheManualGrelha({ chave, titulo, descricao, colunas, anoAtivo, peri
 
   const updateItemLabel = (grupoKey, itemKey, newLabel, newOrigem) => {
     const newGrupos = grupos.map(g => g.key === grupoKey
-      ? { ...g, itens: g.itens.map(i => i.key === itemKey ? { ...i, label: newLabel, origem: newOrigem !== undefined ? newOrigem : i.origem } : i) }
+      ? { ...g, itens: (g.itens || []).map(i => i.key === itemKey ? { ...i, label: newLabel, origem: newOrigem !== undefined ? newOrigem : i.origem } : i) }
       : g
     );
     saveGrupos(newGrupos);
@@ -2276,8 +2451,9 @@ const RESUMO_GRUPOS_DEFAULT = withDemoSeed([
   { key: 'diversos',              label: 'Diversos',                 tipo: 'saida',   auto: 'manual', manualChave: 'diversos',       manualGrupo: null,                    itens: [] },
 ]);
 
-function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temSimulacao, vistaGlobal, mesGlobal, quinzenaGlobal, canEditPrevDatas = false, onUpdateRecebimentoPrev = null }) {
+function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temSimulacao, vistaGlobal, mesGlobal, quinzenaGlobal, canEditPrevDatas = false, onUpdateRecebimentoPrev = null, onUpdatePagamentoPrev = null }) {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [anoSel, setAnoSel]       = useState(anoAtivo || 2026);
   const [numMeses, setNumMeses]   = useState(6);
   const [vistaLocal, setVistaLocal] = useState('quinzenal');
@@ -2294,10 +2470,14 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
   const [novoGrupo, setNovoGrupo]     = useState({ label: '', tipo: 'saida' });
   const [toast, setToast]         = useState(null);
   const [recebimentoDateEdit, setRecebimentoDateEdit] = useState(null);
+  const [pagamentoDateEdit, setPagamentoDateEdit] = useState(null);
   const [recebimentosCellPicker, setRecebimentosCellPicker] = useState(null);
+  const [pagamentosCellPicker, setPagamentosCellPicker] = useState(null);
   const [resumoInfoDetail, setResumoInfoDetail] = useState(null);
+  const [selectedResumoPagamento, setSelectedResumoPagamento] = useState(null);
   const [downloadMenuOpen, setDownloadMenuOpen] = useState(false);
   const recebimentoDateInputRef = useRef(null);
+  const pagamentoDateInputRef = useRef(null);
   const resumoScrollRef = useRef(null);
   const resumoFullscreenScrollRef = useRef(null);
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 1800); };
@@ -2385,20 +2565,30 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
   };
   const createYearBuckets = () => Object.fromEntries(timelineYears.map(ano => [ano, Array(12).fill(null).map(() => [0,0])]));
   const valCli = createYearBuckets();
+  const valCliReal = createYearBuckets();
   recebimentos.forEach(r => {
     const fallbackYear = extractYear(r.dataEmissao, r.prevRecebimento, r.nFatura, r.id);
     const d = parseDia(r.prevRecebimento || r.dataEmissao || '', fallbackYear);
     if (!d || d.mi < 0 || d.mi > 11) return;
     if (!valCli[d.ano]) valCli[d.ano] = Array(12).fill(null).map(() => [0,0]);
     valCli[d.ano][d.mi][d.dia <= 15 ? 0 : 1] += r.valor || 0;
+    if (r.estadoRec === 'recebido') {
+      if (!valCliReal[d.ano]) valCliReal[d.ano] = Array(12).fill(null).map(() => [0,0]);
+      valCliReal[d.ano][d.mi][d.dia <= 15 ? 0 : 1] += r.valor || 0;
+    }
   });
   const valForn = createYearBuckets();
+  const valFornReal = createYearBuckets();
   pagamentos.forEach(p => {
     const fallbackYear = extractYear(p.dataFatura, p.prevPagamento, p.nFatura, p.id);
     const d = parseDia(p.prevPagamento || p.dataFatura || '', fallbackYear);
     if (!d || d.mi < 0 || d.mi > 11) return;
     if (!valForn[d.ano]) valForn[d.ano] = Array(12).fill(null).map(() => [0,0]);
     valForn[d.ano][d.mi][d.dia <= 15 ? 0 : 1] += p.valor || 0;
+    if (p.estadoPag === 'pago') {
+      if (!valFornReal[d.ano]) valFornReal[d.ano] = Array(12).fill(null).map(() => [0,0]);
+      valFornReal[d.ano][d.mi][d.dia <= 15 ? 0 : 1] += p.valor || 0;
+    }
   });
 
   // Lê do sis_tesouraria_manual (ou dadosSimulados) para grupos auto='manual'
@@ -2420,6 +2610,11 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
     if (g.key === 'clientes')     return valCli[ano]?.[mi]?.[q] || 0;
     if (g.key === 'fornecedores') return valForn[ano]?.[mi]?.[q] || 0;
     if (g.auto === 'manual')      return getManualGrupoVal(g.manualChave, g.manualGrupo, ano, mi, q);
+    return 0;
+  };
+  const getAutoRealVal = (g, ano, mi, q) => {
+    if (g.key === 'clientes') return valCliReal[ano]?.[mi]?.[q] || 0;
+    if (g.key === 'fornecedores') return valFornReal[ano]?.[mi]?.[q] || 0;
     return 0;
   };
 
@@ -2514,12 +2709,31 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
   const totalSaidasCol   = (col) => grupos.filter(g => g.tipo === 'saida').reduce((s, g) => s + getColVal(g, col), 0);
   const totalEntradas = (ano, mi, q) => grupos.filter(g => g.tipo === 'entrada').reduce((s, g) => s + _getGQ(g, ano, mi, q), 0);
   const totalSaidas   = (ano, mi, q) => grupos.filter(g => g.tipo === 'saida').reduce((s,   g) => s + _getGQ(g, ano, mi, q), 0);
+  const getColRealizadoVal = (g, col) => {
+    if (!g.auto || !['clientes', 'fornecedores'].includes(g.key)) return 0;
+    if (col.anual) {
+      return meses.reduce((s, _, mi) => s + getAutoRealVal(g, col.ano, mi, 0) + getAutoRealVal(g, col.ano, mi, 1), 0);
+    }
+    if (col.q === null) {
+      return getAutoRealVal(g, col.ano, col.mi, 0) + getAutoRealVal(g, col.ano, col.mi, 1);
+    }
+    return getAutoRealVal(g, col.ano, col.mi, col.q);
+  };
+  const totalEntradasRealCol = (col) => grupos
+    .filter(g => g.tipo === 'entrada')
+    .reduce((s, g) => s + getColRealizadoVal(g, col), 0);
+  const totalSaidasRealCol = (col) => grupos
+    .filter(g => g.tipo === 'saida')
+    .reduce((s, g) => s + getColRealizadoVal(g, col), 0);
 
   let acum = 0;
+  let acumRealizado = 0;
   const saldos = colunas.map((col) => {
     const s = totalEntradasCol(col) - totalSaidasCol(col);
+    const sRealizado = totalEntradasRealCol(col) - totalSaidasRealCol(col);
     acum += s;
-    return { quinzenal: s, acumulado: acum };
+    acumRealizado += sRealizado;
+    return { quinzenal: s, acumulado: acum, realizado: sRealizado, acumuladoRealizado: acumRealizado };
   });
 
   // ── Estilos ──────────────────────────────────────────────────────────────────
@@ -2566,6 +2780,39 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
     return baseBg === '#e0f2ea' || baseBg === '#fce8e8' ? activeColumnBgStrong : activeColumnBg;
   };
   const activeResumoColIndex = Math.max(0, colunas.findIndex(col => isColunaActual(col.mes, col.q, col.ano)));
+  const formatSignedValue = (value, isEntrada) => `${isEntrada ? '+' : '−'}${Math.abs(value).toLocaleString('pt-PT')} €`;
+  const renderTemporalValue = (total, realizado, isEntrada, toneColor) => {
+    if (!total || total === 0) return '—';
+    const realizadoSeguro = Math.min(Math.max(realizado || 0, 0), total);
+    const previsto = Math.max(0, total - realizadoSeguro);
+    if (realizadoSeguro > 0 && previsto > 0) {
+      return (
+        <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', lineHeight: 1.15 }}>
+          <span style={{ fontWeight: 700, color: toneColor }}>{formatSignedValue(realizadoSeguro, isEntrada)}</span>
+          <span style={{ color: toneColor, opacity: 0.78 }}>{formatSignedValue(previsto, isEntrada)}</span>
+        </div>
+      );
+    }
+    if (realizadoSeguro > 0) {
+      return <span style={{ fontWeight: 700, color: toneColor }}>{formatSignedValue(realizadoSeguro, isEntrada)}</span>;
+    }
+    return <span style={{ color: toneColor }}>{formatSignedValue(total, isEntrada)}</span>;
+  };
+  const renderTemporalSaldo = (total, realizado, positiveColor, negativeColor) => {
+    if (total === 0) return '—';
+    const colorFor = (value) => (value >= 0 ? positiveColor : negativeColor);
+    const previsto = total - (realizado || 0);
+    if (realizado !== 0 && previsto !== 0) {
+      return (
+        <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', lineHeight: 1.15 }}>
+          <span style={{ fontWeight: 700, color: colorFor(realizado) }}>{fmtS(realizado)}</span>
+          <span style={{ color: colorFor(previsto), opacity: 0.8 }}>{fmtS(previsto)}</span>
+        </div>
+      );
+    }
+    if (realizado !== 0) return <span style={{ fontWeight: 700, color: colorFor(realizado) }}>{fmtS(realizado)}</span>;
+    return <span style={{ color: colorFor(total) }}>{fmtS(total)}</span>;
+  };
 
   const recebimentoInCol = (recebimento, col) => {
     const fallbackYear = extractYear(recebimento.prevRecebimento, recebimento.dataEmissao, recebimento.nFatura, recebimento.id);
@@ -2594,6 +2841,14 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
     });
   };
 
+  const openPagamentoEditor = (pagamento) => {
+    setPagamentoDateEdit({
+      pagamentoId: pagamento.id,
+      nome: `${pagamento.fornecedor} — ${pagamento.nFatura || pagamento.id}`,
+      currentDate: /^\d{4}-\d{2}-\d{2}$/.test(pagamento.prevPagamento || '') ? pagamento.prevPagamento : '',
+    });
+  };
+
   const handleClientesCellClick = (col) => {
     if (!canEditPrevDatas) return;
     const matches = getRecebimentosForCol(col);
@@ -2610,6 +2865,16 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
     setRecebimentosCellPicker({ items: matches });
   };
 
+  const handlePagamentosItemsClick = (matches) => {
+    if (!canEditPrevDatas) return;
+    if (!matches.length) return;
+    if (matches.length === 1) {
+      openPagamentoEditor(matches[0]);
+      return;
+    }
+    setPagamentosCellPicker({ items: matches });
+  };
+
   const openResumoDetailFromItems = (title, items) => {
     if (!items?.length) return;
     setResumoInfoDetail({ title, items });
@@ -2622,10 +2887,41 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
       return;
     }
     if (item.tipo === 'pagamento') {
-      navigate('/fornecedores', { state: item.fornId ? { abrirFaturaForn: { faturaId: item.id, fornecedorId: item.fornId } } : undefined });
+      setSelectedResumoPagamento(item);
       return;
     }
   };
+
+  const syncSelectedResumoPagamento = (updated) => {
+    if (!updated || !selectedResumoPagamento || selectedResumoPagamento.id !== updated.id) return;
+    setSelectedResumoPagamento((prev) => prev ? { ...prev, ...updated, estadoPag: updated.estado } : prev);
+  };
+
+  const saveResumoPagamentoNote = (item, note) => {
+    const updated = saveFornecedorInvoiceNote(item.fornId, item.id, note, actorName(user));
+    if (updated) syncSelectedResumoPagamento(updated);
+  };
+
+  const advanceResumoPagamento = (item) => {
+    const updated = advanceFornecedorInvoiceWorkflow(item.fornId, item.id, actorName(user));
+    if (updated) syncSelectedResumoPagamento(updated);
+  };
+
+  const returnResumoPagamento = (item) => {
+    const updated = returnFornecedorInvoiceWorkflow(item.fornId, item.id, actorName(user));
+    if (updated) syncSelectedResumoPagamento(updated);
+  };
+
+  const rejectResumoPagamento = (item) => {
+    const updated = rejectFornecedorInvoiceWorkflow(item.fornId, item.id, actorName(user));
+    if (updated) syncSelectedResumoPagamento(updated);
+  };
+
+  useEffect(() => {
+    if (!selectedResumoPagamento) return;
+    const refreshed = pagamentos.find((item) => item.id === selectedResumoPagamento.id && item.fornId === selectedResumoPagamento.fornId);
+    if (refreshed && refreshed !== selectedResumoPagamento) setSelectedResumoPagamento(refreshed);
+  }, [pagamentos, selectedResumoPagamento]);
 
   useEffect(() => {
     const target = resumoScrollRef.current;
@@ -2658,6 +2954,19 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
     }, 20);
     return () => clearTimeout(timer);
   }, [recebimentoDateEdit]);
+
+  useEffect(() => {
+    if (!pagamentoDateEdit) return;
+    const timer = setTimeout(() => {
+      const input = pagamentoDateInputRef.current;
+      if (!input) return;
+      input.focus();
+      if (typeof input.showPicker === 'function') {
+        try { input.showPicker(); } catch {}
+      }
+    }, 20);
+    return () => clearTimeout(timer);
+  }, [pagamentoDateEdit]);
 
   // ── Render grupos ────────────────────────────────────────────────────────────
   const renderGrupo = (g) => {
@@ -2710,28 +3019,41 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
               </div>
             )}
           </td>
-          {colunas.map((col, ci) => {
-            const v = getColVal(g, col);
-            const isLast = col.q===1 || col.q===null || col.anual;
-            const isFirst = col.q===0 || col.q===null || col.anual;
-            return (
+            {colunas.map((col, ci) => {
+              const v = getColVal(g, col);
+              const realizado = getColRealizadoVal(g, col);
+              const isLast = col.q===1 || col.q===null || col.anual;
+              const isFirst = col.q===0 || col.q===null || col.anual;
+              return (
               <td
                 key={col.mes+(col.q??'m')+ci}
                 style={{ ...tdStyle(isLast), borderLeft: isFirst ? '1px solid var(--border)' : undefined,
                   background: resumoColumnCellBg(col),
                   fontWeight: 600,
                   color: v > 0 ? (isEntrada ? 'var(--color-success)' : 'var(--color-danger)') : 'var(--text-muted)',
-                  cursor: g.key === 'clientes' && canEditPrevDatas && v > 0 ? 'pointer' : 'default',
-                  textDecoration: g.key === 'clientes' && canEditPrevDatas && v > 0 ? 'underline dotted rgba(25,118,210,0.45)' : 'none',
-                  textUnderlineOffset: g.key === 'clientes' && canEditPrevDatas && v > 0 ? 3 : undefined,
+                  cursor: ((g.key === 'clientes' || g.key === 'fornecedores') && canEditPrevDatas && v > 0) ? 'pointer' : 'default',
+                  textDecoration: ((g.key === 'clientes' || g.key === 'fornecedores') && canEditPrevDatas && v > 0) ? 'underline dotted rgba(25,118,210,0.45)' : 'none',
+                  textUnderlineOffset: ((g.key === 'clientes' || g.key === 'fornecedores') && canEditPrevDatas && v > 0) ? 3 : undefined,
                 }}
                 onClick={() => {
-                  if (g.key !== 'clientes' || !v) return;
-                  handleClientesCellClick(col);
+                  if (!v) return;
+                  if (g.key === 'clientes') {
+                    handleClientesCellClick(col);
+                    return;
+                  }
+                  if (g.key === 'fornecedores') {
+                    handlePagamentosItemsClick(getPagamentosForCol(col));
+                  }
                 }}
-                title={g.key === 'clientes' && canEditPrevDatas && v > 0 ? 'Alterar data prevista dos recebimentos desta célula' : undefined}
+                title={
+                  (g.key === 'clientes' && canEditPrevDatas && v > 0)
+                    ? 'Alterar data prevista dos recebimentos desta célula'
+                    : (g.key === 'fornecedores' && canEditPrevDatas && v > 0)
+                      ? 'Alterar data prevista dos pagamentos desta célula'
+                      : undefined
+                }
               >
-                {v > 0 ? (isEntrada ? '+' : '−') + v.toLocaleString('pt-PT') + ' €' : '—'}
+                {renderTemporalValue(v, realizado, isEntrada, v > 0 ? (isEntrada ? 'var(--color-success)' : 'var(--color-danger)') : 'var(--text-muted)')}
               </td>
             );
           })}
@@ -2863,6 +3185,11 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
               {colunas.map((col, ci) => {
                 const v = getV(col);
                 const details = getDetails ? getDetails(col) : [];
+                const realizado = details.reduce((sum, item) => {
+                  if (item.tipo === 'recebimento' && item.estadoRec === 'recebido') return sum + (item.valor || 0);
+                  if (item.tipo === 'pagamento' && item.estadoPag === 'pago') return sum + (item.valor || 0);
+                  return sum;
+                }, 0);
                 const isLast = col.q===1 || col.q===null || col.anual;
                 const isFirst = col.q===0 || col.q===null || col.anual;
                 return (
@@ -2874,19 +3201,27 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
                       background: resumoColumnCellBg(col, itemBg),
                       fontSize: 11,
                       color: v > 0 ? (isEntrada ? 'var(--color-success)' : 'var(--color-danger)') : 'var(--text-muted)',
-                      cursor: editavel && v > 0 ? 'pointer' : 'default',
-                      textDecoration: editavel && v > 0 ? 'underline dotted rgba(25,118,210,0.45)' : 'none',
-                      textUnderlineOffset: editavel && v > 0 ? 3 : undefined,
+                      cursor: (editavel || (g.key === 'fornecedores' && canEditPrevDatas)) && v > 0 ? 'pointer' : 'default',
+                      textDecoration: (editavel || (g.key === 'fornecedores' && canEditPrevDatas)) && v > 0 ? 'underline dotted rgba(25,118,210,0.45)' : 'none',
+                      textUnderlineOffset: (editavel || (g.key === 'fornecedores' && canEditPrevDatas)) && v > 0 ? 3 : undefined,
                     }}
                     onClick={() => {
-                      if (!editavel || !v) return;
-                      handleRecebimentosItemsClick(details.filter(item => item.clienteId));
+                      if (!v) return;
+                      if (g.key === 'clientes') {
+                        if (!editavel) return;
+                        handleRecebimentosItemsClick(details.filter(item => item.clienteId));
+                        return;
+                      }
+                      if (g.key === 'fornecedores') {
+                        if (!canEditPrevDatas) return;
+                        handlePagamentosItemsClick(details.filter(item => item.fornId || item.processoId));
+                      }
                     }}
-                    title={editavel && v > 0 ? 'Alterar data prevista' : undefined}
+                    title={(editavel || (g.key === 'fornecedores' && canEditPrevDatas)) && v > 0 ? 'Alterar data prevista' : undefined}
                   >
                     {v > 0 ? (
                       <div style={{ display:'inline-flex', alignItems:'center', justifyContent:'flex-end', gap:6 }}>
-                        <span>{(isEntrada ? '+' : '−') + v.toLocaleString('pt-PT') + ' €'}</span>
+                        {renderTemporalValue(v, realizado, isEntrada, isEntrada ? 'var(--color-success)' : 'var(--color-danger)')}
                         {details.length > 0 && (
                           <button
                             type="button"
@@ -2999,8 +3334,9 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
             <td style={{ padding: '7px 14px', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--color-success)', borderRight: '0.5px solid var(--border)', borderBottom: '0.5px solid var(--border)', ...STICKY, background: '#e0f2ea' }}>Total Entradas</td>
             {colunas.map((col, ci) => {
               const v = totalEntradasCol(col);
+              const realizado = totalEntradasRealCol(col);
               const isLast = col.q===1||col.q===null||col.anual; const isFirst = col.q===0||col.q===null||col.anual;
-              return <td key={col.mes+(col.q??'m')+ci} style={{ ...tdStyle(isLast), borderLeft: isFirst ? '1px solid var(--border)' : undefined, fontWeight: 700, color: 'var(--color-success)', background: resumoColumnCellBg(col, '#e0f2ea') }}>{v > 0 ? `${v.toLocaleString('pt-PT')} €` : '—'}</td>;
+              return <td key={col.mes+(col.q??'m')+ci} style={{ ...tdStyle(isLast), borderLeft: isFirst ? '1px solid var(--border)' : undefined, fontWeight: 700, color: 'var(--color-success)', background: resumoColumnCellBg(col, '#e0f2ea') }}>{renderTemporalValue(v, realizado, true, 'var(--color-success)')}</td>;
             })}
           </tr>
           <tr><td colSpan={colunas.length + 1} style={{ height: 3, background: 'var(--border)' }} /></tr>
@@ -3016,8 +3352,9 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
             <td style={{ padding: '7px 14px', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--color-danger)', borderRight: '0.5px solid var(--border)', borderBottom: '0.5px solid var(--border)', ...STICKY, background: '#fce8e8' }}>Total Saídas</td>
             {colunas.map((col, ci) => {
               const v = totalSaidasCol(col);
+              const realizado = totalSaidasRealCol(col);
               const isLast = col.q===1||col.q===null||col.anual; const isFirst = col.q===0||col.q===null||col.anual;
-              return <td key={col.mes+(col.q??'m')+ci} style={{ ...tdStyle(isLast), borderLeft: isFirst ? '1px solid var(--border)' : undefined, fontWeight: 700, color: 'var(--color-danger)', background: resumoColumnCellBg(col, '#fce8e8') }}>{v > 0 ? `${v.toLocaleString('pt-PT')} €` : '—'}</td>;
+              return <td key={col.mes+(col.q??'m')+ci} style={{ ...tdStyle(isLast), borderLeft: isFirst ? '1px solid var(--border)' : undefined, fontWeight: 700, color: 'var(--color-danger)', background: resumoColumnCellBg(col, '#fce8e8') }}>{renderTemporalValue(v, realizado, false, 'var(--color-danger)')}</td>;
             })}
           </tr>
           <tr><td colSpan={colunas.length + 1} style={{ height: 3, background: 'var(--border)' }} /></tr>
@@ -3025,16 +3362,18 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
             <td style={{ padding: '7px 14px', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-secondary)', borderRight: '0.5px solid var(--border)', borderBottom: '0.5px solid var(--border)', ...STICKY, background: 'var(--bg-app)' }}>Saldo Quinzenal</td>
             {colunas.map((col, idx) => {
               const s = saldos[idx].quinzenal;
+              const sRealizado = saldos[idx].realizado;
               const isLast = col.q===1||col.q===null||col.anual; const isFirst = col.q===0||col.q===null||col.anual;
-              return <td key={col.mes+(col.q??'m')+idx} style={{ ...tdStyle(isLast), borderLeft: isFirst ? '1px solid var(--border)' : undefined, fontWeight: 700, color: s >= 0 ? 'var(--color-success)' : 'var(--color-danger)', background: resumoColumnCellBg(col, s >= 0 ? 'rgba(46,125,82,0.07)' : 'rgba(184,50,50,0.07)') }}>{fmtS(s)}</td>;
+              return <td key={col.mes+(col.q??'m')+idx} style={{ ...tdStyle(isLast), borderLeft: isFirst ? '1px solid var(--border)' : undefined, fontWeight: 700, color: s >= 0 ? 'var(--color-success)' : 'var(--color-danger)', background: resumoColumnCellBg(col, s >= 0 ? 'rgba(46,125,82,0.07)' : 'rgba(184,50,50,0.07)') }}>{renderTemporalSaldo(s, sRealizado, 'var(--color-success)', 'var(--color-danger)')}</td>;
             })}
           </tr>
           <tr>
             <td style={{ padding: '8px 14px', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#fff', background: 'var(--brand-primary)', borderRight: '1px solid rgba(255,255,255,0.2)', borderBottom: '0.5px solid rgba(255,255,255,0.15)', ...STICKY, zIndex: 1 }}>Saldo Acumulado</td>
             {colunas.map((col, idx) => {
               const s = saldos[idx].acumulado;
+              const sRealizado = saldos[idx].acumuladoRealizado;
               const isFirst = col.q===0||col.q===null||col.anual; const isLast = col.q===1||col.q===null||col.anual;
-              return <td key={col.mes+(col.q??'m')+idx} style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700, fontSize: 12, whiteSpace: 'nowrap', borderLeft: isFirst ? '1px solid rgba(255,255,255,0.15)' : undefined, borderRight: isLast ? '1px solid rgba(255,255,255,0.15)' : '0.5px solid rgba(255,255,255,0.1)', borderBottom: '0.5px solid rgba(255,255,255,0.1)', background: isColunaActual(col.mes, col.q) ? '#7c8590' : 'var(--brand-primary)', color: s >= 0 ? '#a8f0c6' : '#ffb3b3' }}>{fmtS(s)}</td>;
+              return <td key={col.mes+(col.q??'m')+idx} style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700, fontSize: 12, whiteSpace: 'nowrap', borderLeft: isFirst ? '1px solid rgba(255,255,255,0.15)' : undefined, borderRight: isLast ? '1px solid rgba(255,255,255,0.15)' : '0.5px solid rgba(255,255,255,0.1)', borderBottom: '0.5px solid rgba(255,255,255,0.1)', background: isColunaActual(col.mes, col.q) ? '#7c8590' : 'var(--brand-primary)', color: s >= 0 ? '#a8f0c6' : '#ffb3b3' }}>{renderTemporalSaldo(s, sRealizado, '#a8f0c6', '#ffb3b3')}</td>;
             })}
           </tr>
         </tbody>
@@ -3044,6 +3383,26 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
 
   return (
     <div>
+      {selectedResumoPagamento && (
+        <PaymentDetailModal
+          item={{
+            ...selectedResumoPagamento,
+            estado: selectedResumoPagamento.estadoPag,
+            fornecedorId: selectedResumoPagamento.fornId,
+            fornecedorNome: selectedResumoPagamento.fornecedor,
+            fornecedorCategoria: selectedResumoPagamento.categoria,
+            data: selectedResumoPagamento.dataFatura,
+            venc: selectedResumoPagamento.dataVenc,
+          }}
+          onClose={() => setSelectedResumoPagamento(null)}
+          onValidate={() => advanceResumoPagamento(selectedResumoPagamento)}
+          onReturn={() => returnResumoPagamento(selectedResumoPagamento)}
+          onReject={() => rejectResumoPagamento(selectedResumoPagamento)}
+          onSaveNote={(note) => saveResumoPagamentoNote(selectedResumoPagamento, note)}
+          canFinalize={selectedResumoPagamento.estadoPag === 'autorizado'}
+        />
+      )}
+
       {toast && (
         <div style={{ position: 'fixed', bottom: 24, right: 24, background: 'var(--color-success)', color: '#fff', padding: '8px 18px', borderRadius: 8, fontSize: 13, fontWeight: 600, zIndex: 9999, boxShadow: '0 4px 16px rgba(0,0,0,0.15)' }}>{toast}</div>
       )}
@@ -3080,6 +3439,38 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
         </div>
       )}
 
+      {pagamentoDateEdit && (
+        <div
+          style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.12)', zIndex:950, display:'flex', alignItems:'center', justifyContent:'center', padding:'1rem' }}
+          onClick={() => setPagamentoDateEdit(null)}
+        >
+          <div
+            style={{ width:'auto', minWidth:220, background:'var(--bg-card)', border:'0.5px solid var(--border)', borderRadius:14, boxShadow:'0 18px 48px rgba(0,0,0,0.12)', padding:'14px' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div style={{ display:'flex', justifyContent:'center' }}>
+              <input
+                ref={pagamentoDateInputRef}
+                type="date"
+                value={pagamentoDateEdit.currentDate || ''}
+                className="sis-input"
+                onChange={e => {
+                  const nextValue = e.target.value || '';
+                  if (!nextValue || !onUpdatePagamentoPrev) return;
+                  onUpdatePagamentoPrev(pagamentoDateEdit.pagamentoId, nextValue);
+                  setPagamentoDateEdit(null);
+                  showToast('✓ Data prevista actualizada');
+                }}
+                style={{ minWidth: 180 }}
+                onKeyDown={e => {
+                  if (e.key === 'Escape') setPagamentoDateEdit(null);
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
       {recebimentosCellPicker && (
         <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.35)', zIndex:949, display:'flex', alignItems:'center', justifyContent:'center', padding:'1rem' }}>
           <div style={{ width:'100%', maxWidth:620, maxHeight:'70vh', overflow:'auto', background:'var(--bg-card)', border:'0.5px solid var(--border)', borderRadius:'var(--radius-lg)', boxShadow:'0 18px 48px rgba(0,0,0,0.18)' }}>
@@ -3109,6 +3500,40 @@ function ResumoGrelha({ pagamentos, recebimentos, anoAtivo, dadosSimulados, temS
             </div>
             <div style={{ padding:'12px 18px', borderTop:'0.5px solid var(--border)', display:'flex', justifyContent:'flex-end' }}>
               <button className="btn btn-sm" onClick={() => setRecebimentosCellPicker(null)}>Fechar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pagamentosCellPicker && (
+        <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.35)', zIndex:949, display:'flex', alignItems:'center', justifyContent:'center', padding:'1rem' }}>
+          <div style={{ width:'100%', maxWidth:620, maxHeight:'70vh', overflow:'auto', background:'var(--bg-card)', border:'0.5px solid var(--border)', borderRadius:'var(--radius-lg)', boxShadow:'0 18px 48px rgba(0,0,0,0.18)' }}>
+            <div style={{ padding:'16px 18px', borderBottom:'0.5px solid var(--border)' }}>
+              <div style={{ fontSize:15, fontWeight:700 }}>Escolher pagamento</div>
+              <div style={{ fontSize:12, color:'var(--text-muted)', marginTop:4 }}>Esta célula tem vários pagamentos. Escolhe qual queres reagendar.</div>
+            </div>
+            <div style={{ padding:'10px 12px', display:'grid', gap:8 }}>
+              {pagamentosCellPicker.items.map(item => (
+                <button
+                  key={item.id}
+                  className="btn"
+                  style={{ justifyContent:'space-between', textAlign:'left', padding:'12px 14px' }}
+                  onClick={() => {
+                    setPagamentosCellPicker(null);
+                    openPagamentoEditor(item);
+                  }}
+                >
+                  <span>
+                    <strong>{item.fornecedor}</strong> {item.nFatura ? `· ${item.nFatura}` : ''}
+                  </span>
+                  <span style={{ fontFamily:'var(--font-mono)', color:'var(--brand-primary)' }}>
+                    {(item.valor || 0).toLocaleString('pt-PT')} €
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div style={{ padding:'12px 18px', borderTop:'0.5px solid var(--border)', display:'flex', justifyContent:'flex-end' }}>
+              <button className="btn btn-sm" onClick={() => setPagamentosCellPicker(null)}>Fechar</button>
             </div>
           </div>
         </div>

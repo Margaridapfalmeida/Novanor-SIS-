@@ -2,6 +2,10 @@ import { createContext, useContext, useState, useCallback, useEffect } from 'rea
 import { loadPerfis, wantsNotif } from './PermissionsConfig';
 
 const NOTIF_KEY = 'sis_notificacoes';
+const OBRAS_DATA_KEY = 'sis_obras_data';
+const FAT_FORN_KEY = 'sis_faturas_forn';
+const FAT_CLI_KEY = 'sis_faturas_cli';
+const PROCESSOS_KEY = 'sis_processos_encomenda';
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 // accionavel: true  → desaparece quando a acção é feita (fat. estado muda)
@@ -17,12 +21,106 @@ const DIAS_ACCION = 1;    // accionáveis concluídas desaparecem após 1 dia (s
 
 function agora() { return Date.now(); }
 
+function loadJson(key, fallback) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || 'null');
+    return parsed ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function parseDateToTime(value) {
+  if (!value || value === '—') return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const d = new Date(`${value}T12:00:00`);
+    return Number.isNaN(d.getTime()) ? null : d.getTime();
+  }
+  const slash = String(value).match(/^(\d{1,2})\/(\d{1,2})\/(20\d{2})$/);
+  if (slash) {
+    const d = new Date(Number(slash[3]), Number(slash[2]) - 1, Number(slash[1]), 12);
+    return Number.isNaN(d.getTime()) ? null : d.getTime();
+  }
+  const mesDia = String(value).match(/(\d{1,2})\s+([A-Za-zç]{3})/);
+  if (mesDia) {
+    const meses = { Jan:0, Fev:1, Mar:2, Abr:3, Mai:4, Jun:5, Jul:6, Ago:7, Set:8, Out:9, Nov:10, Dez:11 };
+    const d = new Date(new Date().getFullYear(), meses[mesDia[2]] || 0, Number(mesDia[1]), 12);
+    return Number.isNaN(d.getTime()) ? null : d.getTime();
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
+}
+
+function hasActiveJado(jadoNum) {
+  if (!jadoNum) return false;
+  const obras = Object.values(loadJson(OBRAS_DATA_KEY, {}));
+  return obras.some((obra) =>
+    (obra?.jados || []).some((jado) =>
+      jado.num === jadoNum && !['validado-ms', 'env-comercial', 'resolvido'].includes(jado.estado)
+    )
+  );
+}
+
+function hasPendingFornecedorFatura(faturaId) {
+  if (!faturaId) return false;
+  const raw = loadJson(FAT_FORN_KEY, {});
+  return Object.values(raw).some((faturas) =>
+    (faturas || []).some((fat) => fat.id === faturaId && fat.estado !== 'pago' && fat.estado !== 'concluido' && fat.validDP !== 'Validada')
+  );
+}
+
+function hasNegativeCashflowWindow() {
+  const now = Date.now();
+  const limit = now + (30 * 86400000);
+  const pagamentosFaturas = Object.values(loadJson(FAT_FORN_KEY, {})).flatMap((faturas) => (faturas || []).map((fat) => ({
+    valor: Number(fat.valor) || 0,
+    estado: fat.estado,
+    time: parseDateToTime(fat.dataPrevisaoPagamento || fat.venc || fat.data),
+  })));
+  const pagamentosProcessos = (loadJson(PROCESSOS_KEY, []) || []).map((processo) => ({
+    valor: Math.max(0, Number(processo.valorPrevisto || 0) - Number(processo.totalFaturado || 0)),
+    estado: processo.estadoFinanceiro,
+    time: parseDateToTime(processo.dataPrevistaPagamento || processo.dataPrevistaFatura || processo.dataPrevistaCalculada),
+  }));
+  const recebimentos = Object.values(loadJson(FAT_CLI_KEY, {})).flatMap((faturas) => (faturas || []).map((fat) => ({
+    valor: Number(fat.valor) || 0,
+    estado: fat.estado,
+    time: parseDateToTime(fat.venc || fat.dataPrevistaRecebimento || fat.data),
+  })));
+
+  const quinzenas = [
+    { from: now, to: now + (15 * 86400000) },
+    { from: now + (15 * 86400000), to: limit },
+  ];
+
+  return quinzenas.some((janela) => {
+    const saidas = [...pagamentosFaturas, ...pagamentosProcessos]
+      .filter((item) => item.time && item.time >= janela.from && item.time <= janela.to)
+      .filter((item) => !['pago', 'concluido'].includes(item.estado))
+      .reduce((sum, item) => sum + item.valor, 0);
+    const entradas = recebimentos
+      .filter((item) => item.time && item.time >= janela.from && item.time <= janela.to)
+      .filter((item) => !['recebido', 'concluido'].includes(item.estado))
+      .reduce((sum, item) => sum + item.valor, 0);
+    return (entradas - saidas) < 0;
+  });
+}
+
+function notifStillActive(notif) {
+  const kind = notif?.meta?.alertKind;
+  if (!kind) return notif.alerta ? true : true;
+  if (kind === 'jado_validacao') return hasActiveJado(notif.meta?.jadoNum);
+  if (kind === 'fatura_dp_pendente') return hasPendingFornecedorFatura(notif.meta?.faturaId);
+  if (kind === 'cashflow_negativo') return hasNegativeCashflowWindow();
+  return true;
+}
+
 function loadNotifs() {
   try {
     const todas = JSON.parse(localStorage.getItem(NOTIF_KEY) || '[]');
     const now = agora();
     return todas.filter(n => {
-      if (n.alerta) return true;                            // alertas ficam sempre
+      if (n.alerta) return notifStillActive(n);            // alertas ficam até a condição deixar de existir
       if (n.accionavel && !n.done) return true;             // accionáveis pendentes ficam
       if (n.accionavel && n.done) {                         // accionáveis feitas: 1 dia
         return (now - new Date(n.doneAt||n.timestamp).getTime()) < DIAS_ACCION * 86400000;
@@ -133,7 +231,7 @@ export function NotificationsProvider({ children }) {
     // actually filter the provided list
     const now = agora();
     const filtrada = list.filter(n => {
-      if (n.alerta) return true;
+      if (n.alerta) return notifStillActive(n);
       if (n.accionavel && !n.done) return true;
       if (n.accionavel && n.done) return (now - new Date(n.doneAt||n.timestamp).getTime()) < DIAS_ACCION * 86400000;
       return (now - new Date(n.timestamp).getTime()) < DIAS_INFO * 86400000;
@@ -258,7 +356,7 @@ export function NotificationsProvider({ children }) {
     if (!user) return [];
     return notifs.filter(n => {
       if (!shouldDeliverToUser(n, user)) return false;
-      if (n.alerta) return true;
+      if (n.alerta) return notifStillActive(n);
       if (n.accionavel && !n.done) return true;
       if (n.accionavel && n.done) return (now - new Date(n.doneAt||n.timestamp).getTime()) < DIAS_ACCION * 86400000;
       return (now - new Date(n.timestamp).getTime()) < DIAS_INFO * 86400000;
@@ -276,11 +374,18 @@ export function NotificationsProvider({ children }) {
 
   useEffect(() => {
     const sync = (e) => {
-      if (e?.key && e.key !== NOTIF_KEY) return;
+      if (e?.key && ![NOTIF_KEY, OBRAS_DATA_KEY, FAT_FORN_KEY, FAT_CLI_KEY, PROCESSOS_KEY].includes(e.key)) return;
       setNotifs(loadNotifs());
     };
     window.addEventListener('storage', sync);
     return () => window.removeEventListener('storage', sync);
+  }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setNotifs(loadNotifs());
+    }, 30000);
+    return () => window.clearInterval(interval);
   }, []);
 
   return (
@@ -494,16 +599,16 @@ export function notifInfoPagamentoEfectuado({ fatura, fornecedor, fornId }) {
 
 export function notifAlertaFaturaAtrasadaDP({ fatura, fornecedor, fornId, diasAtraso }) {
   return [
-    { tipo: 'alerta', alerta: true, icon: '⏰', titulo: `Fatura sem validação há ${diasAtraso} dias`, sub: `${fornecedor} · ${fatura.nFatura||fatura.id}`, path: '/fornecedores', destinatario: 'dp', meta: { faturaId: fatura.id, fornecedorId: fornId } },
-    { tipo: 'alerta', alerta: true, icon: '⏰', titulo: `DP não validou há ${diasAtraso} dias — ${fornecedor}`, sub: `${fatura.nFatura||fatura.id} · ${fatura.obra}`, path: '/fornecedores', destinatario: 'lg', meta: { faturaId: fatura.id, fornecedorId: fornId } },
+    { tipo: 'alerta', alerta: true, icon: '⏰', titulo: `Fatura sem validação há ${diasAtraso} dias`, sub: `${fornecedor} · ${fatura.nFatura||fatura.id}`, path: '/fornecedores', destinatario: 'dp', meta: { faturaId: fatura.id, fornecedorId: fornId, alertKind: 'fatura_dp_pendente' } },
+    { tipo: 'alerta', alerta: true, icon: '⏰', titulo: `DP não validou há ${diasAtraso} dias — ${fornecedor}`, sub: `${fatura.nFatura||fatura.id} · ${fatura.obra}`, path: '/fornecedores', destinatario: 'lg', meta: { faturaId: fatura.id, fornecedorId: fornId, alertKind: 'fatura_dp_pendente' } },
   ];
 }
 
 export function notifAlertaCashflowNegativo({ quinzena, valorPrevisto }) {
   const fmt = v => '€ ' + Math.abs(v).toLocaleString('pt-PT');
   return [
-    { tipo: 'alerta', alerta: true, icon: '⚠️', titulo: `Cashflow negativo previsto`, sub: `${quinzena} · Défice de ${fmt(valorPrevisto)} · Rever mapa`, path: '/tesouraria', destinatario: 'ms', meta: { tab: 'resumo' } },
-    { tipo: 'alerta', alerta: true, icon: '⚠️', titulo: `Cashflow negativo previsto`, sub: `${quinzena} · Défice de ${fmt(valorPrevisto)}`, path: '/tesouraria', destinatario: 'lg', meta: { tab: 'resumo' } },
+    { tipo: 'alerta', alerta: true, icon: '⚠️', titulo: `Cashflow negativo previsto`, sub: `${quinzena} · Défice de ${fmt(valorPrevisto)} · Rever mapa`, path: '/tesouraria', destinatario: 'ms', meta: { tab: 'resumo', alertKind: 'cashflow_negativo', quinzena } },
+    { tipo: 'alerta', alerta: true, icon: '⚠️', titulo: `Cashflow negativo previsto`, sub: `${quinzena} · Défice de ${fmt(valorPrevisto)}`, path: '/tesouraria', destinatario: 'lg', meta: { tab: 'resumo', alertKind: 'cashflow_negativo', quinzena } },
   ];
 }
 

@@ -1,13 +1,29 @@
 import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNotifications } from '../context/NotificationsContext';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import AdicionarDocumentoModal, { loadDocumentos, saveDocumentos, TIPOS_DOC } from '../components/shared/AdicionarDocumentoModal';
 import { canEditModule } from '../context/PermissionsConfig';
 import { withDemoSeed } from '../utils/deliveryMode';
+import { loadProcessosEncomenda, updateProcessoEncomenda } from '../utils/encomendaWorkflow';
+import { generateFornecedorValidationStampedPdf, parseFornecedorInvoiceFile } from '../utils/fornecedorPdfWorkflow';
+import { filterRemovedById, markRemovedId } from '../utils/entityRemoval';
+import {
+  advanceFornecedorInvoiceWorkflow,
+  downloadFornecedorPaymentDoc,
+  formatFornecedorPaymentDate,
+  getFornecedorInvoiceDocs,
+  getFornecedorWorkflowMemory,
+  nextActionLabelFornecedorPagamento,
+  rejectFornecedorInvoiceWorkflow,
+  returnFornecedorInvoiceWorkflow,
+  saveFornecedorInvoiceNote,
+  statusMetaFornecedorPagamento,
+} from '../utils/fornecedorPayments';
 
 // ─── STORAGE ──────────────────────────────────────────────────────────────────
 const STORAGE_KEY = 'sis_fornecedores_extra';
+const STORAGE_KEY_REMOVED = 'sis_fornecedores_removed';
 function loadExtras() {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); }
   catch { return []; }
@@ -15,6 +31,7 @@ function loadExtras() {
 function saveExtras(list) { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); }
 
 const FAT_KEY_FORN = 'sis_faturas_forn';
+const PAGE_WIDE_STYLE = { width: 'calc(100% )', marginLeft: -12, marginRight: -12, maxWidth: 'none' };
 function loadFaturasForn(fornId, defaultFaturas) {
   try {
     const all = JSON.parse(localStorage.getItem(FAT_KEY_FORN) || '{}');
@@ -71,6 +88,36 @@ function downloadPdf(pdf) {
   a.href = pdf.base64;
   a.download = pdf.name || 'documento.pdf';
   a.click();
+}
+
+function actorName(user) {
+  return user?.nome || user?.initials || user?.id || 'SIS';
+}
+
+function SmallFornecedorAction({ children, onClick, title, danger = false, primary = false }) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      style={{
+        border: 'none',
+        cursor: 'pointer',
+        width: 24,
+        height: 24,
+        borderRadius: 6,
+        background: primary ? '#2E7D52' : danger ? '#B83232' : '#1C5F9A',
+        color: '#fff',
+        fontSize: 11,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: 0,
+      }}
+    >
+      {children}
+    </button>
+  );
 }
 
 // ─── PERFIS ───────────────────────────────────────────────────────────────────
@@ -158,6 +205,66 @@ export const FORNECEDORES_DATA = withDemoSeed([
 
 const CATS = ['Estruturas metálicas','Instalações elétricas','Subempreitada geral','AVAC e climatização','Betão e prefabricados','Isolamentos e impermeabilização','Serralharia','Carpintaria','Pintura','Outro'];
 const CATEGORIAS = ['Todas', ...CATS];
+const MERCADOS_ENTIDADE = ['Nacional', 'União Europeia (UE)', 'Outros mercados'];
+export const FORNECEDOR_TIPOS = {
+  materiais: { label: 'Materiais / Obras' },
+  estrutura: { label: 'Estrutura / Logística' },
+};
+
+function hasMaterialWorkflow(fornecedor = {}) {
+  const fornecedorId = fornecedor?.id || null;
+  const fornecedorNome = String(fornecedor?.nome || '').trim().toLowerCase();
+  if (!fornecedorId && !fornecedorNome) return false;
+  return loadProcessosEncomenda().some((processo) => {
+    const processoNome = String(processo?.fornecedor || '').trim().toLowerCase();
+    return (fornecedorId && processo?.fornecedorId === fornecedorId)
+      || (fornecedorNome && processoNome === fornecedorNome);
+  });
+}
+
+export function inferFornecedorTipo(fornecedor = {}) {
+  if (fornecedor.tipoFornecedor === 'materiais') return 'materiais';
+  if (hasMaterialWorkflow(fornecedor)) return 'materiais';
+  if (fornecedor.tipoFornecedor === 'estrutura') return 'estrutura';
+  const categoria = String(fornecedor.categoria || '').toLowerCase();
+  if (/(estrutura|logistic|escritorio|servicos gerais|interno|frota|combust|renda|telecom|contabilidade)/i.test(categoria)) return 'estrutura';
+  return 'materiais';
+}
+
+function getFornecedorFlowMeta(fornecedor = {}) {
+  const tipo = inferFornecedorTipo(fornecedor);
+  if (tipo === 'estrutura') {
+    return {
+      tipo,
+      requiresEncomenda: false,
+      requiresDP: false,
+      requiresStamp: false,
+      initialEstado: 'pending-lg',
+      initialValidDP: 'Não aplicável',
+    };
+  }
+  return {
+    tipo,
+    requiresEncomenda: true,
+    requiresDP: true,
+    requiresStamp: true,
+    initialEstado: 'pending-dp',
+    initialValidDP: 'Pendente',
+  };
+}
+
+function formatEncomendaEstado(estado) {
+  if (estado === 'satisfeita') return { label: 'Satisfeita', cls: 'badge-s' };
+  if (estado === 'parcial') return { label: 'Receção parcial', cls: 'badge-w' };
+  if (estado === 'draft') return { label: 'Draft', cls: 'badge-n' };
+  if (estado === 'standby-jado') return { label: 'Stand-by JADO', cls: 'badge-i' };
+  return { label: 'Emitida', cls: 'badge-i' };
+}
+
+function FornecedorTipoBadge({ tipo }) {
+  const cfg = FORNECEDOR_TIPOS[tipo] || FORNECEDOR_TIPOS.materiais;
+  return <span className={`badge ${tipo === 'estrutura' ? 'badge-n' : 'badge-i'}`}>{cfg.label}</span>;
+}
 // ─── UTILITÁRIOS DE DATA ─────────────────────────────────────────────────────
 function calcularDataPrevisao(condPag, dataEmissao, dataVencimento) {
   try {
@@ -203,22 +310,258 @@ function getObrasLista() {
   return uniqueObras([...OBRAS_BASE_LISTA, ...loadObrasExtraIds()]).sort((a, b) => a.localeCompare(b));
 }
 
+function getEligibleProcessosFornecedor(fornecedor) {
+  return loadProcessosEncomenda()
+    .filter((processo) => {
+      if (!fornecedor?.nome) return false;
+      if (processo.fornecedor !== fornecedor.nome) return false;
+      if (processo.estadoWorkflow === 'pagamento_efetuado') return false;
+      return true;
+    })
+    .sort((a, b) => String(b.emitidaEm || b.dataCriacao || '').localeCompare(String(a.emitidaEm || a.dataCriacao || '')));
+}
+
+function loadEncomendaFornecedor(processo) {
+  if (!processo?.obraId || !processo?.encomendaId) return null;
+  try {
+    const raw = JSON.parse(localStorage.getItem(`sis_encomendas_${processo.obraId}`) || '[]');
+    return (raw || []).find(enc => enc.id === processo.encomendaId) || null;
+  } catch {
+    return null;
+  }
+}
+
+function loadEncomendasObra(obraId) {
+  if (!obraId) return [];
+  try {
+    return JSON.parse(localStorage.getItem(`sis_encomendas_${obraId}`) || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function saveEncomendasObra(obraId, encomendas) {
+  if (!obraId) return;
+  const json = JSON.stringify(encomendas || []);
+  localStorage.setItem(`sis_encomendas_${obraId}`, json);
+  window.dispatchEvent(new StorageEvent('storage', { key: `sis_encomendas_${obraId}`, newValue: json }));
+}
+
+function calcEncItemLiquido(item) {
+  return (Number(item?.qtd) || 0) * (Number(item?.preco) || 0) * (1 - (Number(item?.desconto) || 0) / 100);
+}
+
+function calcEncItemIVA(item) {
+  return calcEncItemLiquido(item) * (Number(item?.iva) || 23) / 100;
+}
+
+function satisfazerArtigosDaFatura({ fatura, itemIds, observacao = '', data = null }) {
+  if (!fatura?.obra || !fatura?.encomendaId || !itemIds?.length) return null;
+  const encomendas = loadEncomendasObra(fatura.obra);
+  const encomenda = encomendas.find(enc => enc.id === fatura.encomendaId);
+  if (!encomenda) return null;
+  const anteriores = new Set(encomenda.satisfiedItemIds || []);
+  const novosIds = [...new Set([...(encomenda.satisfiedItemIds || []), ...itemIds])];
+  const allItemIds = (encomenda.itens || []).map(item => item.itemId);
+  const estado = allItemIds.every(itemId => novosIds.includes(itemId)) ? 'satisfeita' : 'parcial';
+  const itensAssociados = (encomenda.itens || []).filter(item => itemIds.includes(item.itemId));
+  const updated = encomendas.map(enc => (
+    enc.id === encomenda.id
+      ? {
+          ...enc,
+          estado,
+          satisfiedItemIds: novosIds,
+          satisfeitaEm: estado === 'satisfeita' ? (data || new Date().toLocaleDateString('pt-PT')) : enc.satisfeitaEm,
+          obsSatisfacao: observacao || enc.obsSatisfacao,
+        }
+      : enc
+  ));
+  saveEncomendasObra(fatura.obra, updated);
+  const processo = loadProcessosEncomenda().find(item => item.encomendaId === fatura.encomendaId);
+  if (processo) {
+    updateProcessoEncomenda(processo.id, {
+      estadoWorkflow: estado === 'satisfeita' ? 'rececao_total' : 'rececao_parcial',
+    });
+  }
+  return {
+    estadoEncomenda: estado,
+    itensAssociados,
+    totalAssociado: itensAssociados.reduce((sum, item) => sum + calcEncItemLiquido(item) + calcEncItemIVA(item), 0),
+    novosIds,
+    novosSelecionados: itensAssociados.filter(item => !anteriores.has(item.itemId)),
+  };
+}
+
+function normalizeMatchText(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function findFornecedorFromPdf(parsed, fornecedores) {
+  const text = normalizeMatchText(`${parsed?.rawText || ''} ${parsed?.fields?.nifFornecedor || ''}`);
+  if (!text) return null;
+  const byNif = (parsed?.fields?.nifFornecedor || '').replace(/\D/g, '');
+  if (byNif) {
+    const matchByNif = fornecedores.find(f => String(f.nif || '').replace(/\D/g, '') === byNif);
+    if (matchByNif) return matchByNif;
+  }
+  const ranked = fornecedores
+    .map(fornecedor => {
+      const nome = normalizeMatchText(fornecedor.nome);
+      if (!nome) return null;
+      const parts = nome.split(' ').filter(part => part.length > 2);
+      const score = parts.reduce((sum, part) => sum + (text.includes(part) ? 1 : 0), 0);
+      return score > 0 ? { fornecedor, score } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score);
+  return ranked[0]?.fornecedor || null;
+}
+
+function findBestProcessoForValor(fornecedorNome, valor) {
+  if (!fornecedorNome || !Number.isFinite(Number(valor))) return null;
+  const alvo = Number(valor);
+  const processos = loadProcessosEncomenda()
+    .filter(processo => processo.fornecedor === fornecedorNome)
+    .map(processo => ({
+      processo,
+      diff: Math.abs((Number(processo.valorPrevisto) || 0) - alvo),
+    }))
+    .sort((a, b) => a.diff - b.diff);
+  return processos[0]?.processo || null;
+}
+
+function InfoPopoverButton({ title, items, onOpenItem }) {
+  const [open, setOpen] = useState(false);
+  const [popoverPos, setPopoverPos] = useState({ top: 0, left: 0 });
+  const btnRef = useRef(null);
+  if (!items?.length) return null;
+
+  const toggleOpen = (event) => {
+    event.stopPropagation();
+    if (!open && btnRef.current) {
+      const rect = btnRef.current.getBoundingClientRect();
+      const width = 340;
+      const left = Math.min(
+        Math.max(12, rect.right - width),
+        window.innerWidth - width - 12
+      );
+      const top = Math.min(rect.bottom + 8, window.innerHeight - 292);
+      setPopoverPos({ top, left });
+    }
+    setOpen((value) => !value);
+  };
+
+  return (
+    <div style={{ position:'relative', display:'inline-flex', alignItems:'center' }}>
+      <button
+        ref={btnRef}
+        onClick={toggleOpen}
+        style={{
+          width:16,
+          height:16,
+          borderRadius:'50%',
+          border:'0.5px solid var(--border-strong)',
+          background:'var(--bg-card)',
+          color:'var(--text-muted)',
+          fontSize:10,
+          fontWeight:700,
+          cursor:'pointer',
+          display:'inline-flex',
+          alignItems:'center',
+          justifyContent:'center',
+          padding:0,
+          marginLeft:6,
+        }}
+        title="Ver detalhe"
+      >
+        i
+      </button>
+      {open && (
+        <>
+          <div style={{ position:'fixed', inset:0, zIndex:9998 }} onClick={() => setOpen(false)} />
+          <div style={{
+            position:'fixed',
+            top:popoverPos.top,
+            left:popoverPos.left,
+            zIndex:9999,
+            width:340,
+            maxHeight:280,
+            overflow:'auto',
+            background:'var(--bg-card)',
+            border:'0.5px solid var(--border)',
+            borderRadius:12,
+            boxShadow:'0 10px 30px rgba(0,0,0,0.14)',
+            padding:'10px 0',
+          }}>
+            <div style={{ padding:'0 12px 8px', fontSize:11, fontWeight:700, color:'var(--text-muted)', textTransform:'uppercase', letterSpacing:'0.04em' }}>
+              {title}
+            </div>
+            {items.map((item) => (
+              <button
+                key={item.id}
+                onClick={() => {
+                  onOpenItem?.(item);
+                  setOpen(false);
+                }}
+                style={{
+                  width:'100%',
+                  textAlign:'left',
+                  border:'none',
+                  background:'transparent',
+                  cursor:'pointer',
+                  padding:'9px 12px',
+                  borderTop:'0.5px solid var(--border)',
+                  fontFamily:'var(--font-body)',
+                }}
+              >
+                <div style={{ display:'flex', justifyContent:'space-between', gap:12, alignItems:'baseline' }}>
+                  <div style={{ minWidth:0 }}>
+                    <div style={{ fontSize:13, fontWeight:600, color:'var(--brand-primary)', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                      {item.title}
+                    </div>
+                    <div style={{ fontSize:11, color:'var(--text-muted)', marginTop:2 }}>
+                      {item.subtitle}
+                    </div>
+                  </div>
+                  {item.value && (
+                    <div style={{ fontSize:12, fontWeight:600, color:'var(--text-primary)', whiteSpace:'nowrap' }}>
+                      {item.value}
+                    </div>
+                  )}
+                </div>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function mergeFornecedoresData(extras = []) {
-  const extrasById = new Map((extras || []).map((fornecedor) => [fornecedor.id, fornecedor]));
+  const extrasFiltered = filterRemovedById(extras, STORAGE_KEY_REMOVED);
+  const extrasById = new Map(extrasFiltered.map((fornecedor) => [fornecedor.id, fornecedor]));
 
   const enrichFornecedor = (fornecedorBase, extra = null) => {
     const merged = extra ? { ...fornecedorBase, ...extra } : { ...fornecedorBase };
     const faturas = loadFaturasForn(merged.id, merged.faturas || []);
     return {
       ...merged,
+      tipoFornecedor: inferFornecedorTipo(merged),
+      classificacaoMercado: merged.classificacaoMercado || 'Nacional',
       faturas,
       obras: uniqueObras([...(fornecedorBase.obras || []), ...(extra?.obras || []), ...faturas.map((fatura) => fatura?.obra)]),
     };
   };
 
   const baseIds = new Set(FORNECEDORES_DATA.map((fornecedor) => fornecedor.id));
-  const mergedBase = FORNECEDORES_DATA.map((fornecedor) => enrichFornecedor(fornecedor, extrasById.get(fornecedor.id)));
-  const extrasOnly = (extras || [])
+  const mergedBase = filterRemovedById(FORNECEDORES_DATA, STORAGE_KEY_REMOVED).map((fornecedor) => enrichFornecedor(fornecedor, extrasById.get(fornecedor.id)));
+  const extrasOnly = extrasFiltered
     .filter((fornecedor) => !baseIds.has(fornecedor.id))
     .map((fornecedor) => enrichFornecedor(fornecedor));
 
@@ -307,20 +650,65 @@ function Doc51FornPanel({ fatura, user, onAdicionado }) {
 }
 
 function RegistarFaturaModal({ fornecedor, onClose, onRegistar }) {
+  const flow = getFornecedorFlowMeta(fornecedor);
+  const isFornecedorMateriais = flow.tipo === 'materiais';
+  const processosElegiveis = getEligibleProcessosFornecedor(fornecedor);
   const [form, setForm] = useState({
-    nFatura: '', obra: '', valor: '', descricao: '',
+    encomendaId: '', nFatura: '', obra: '', valor: '', descricao: '',
     data: new Date().toISOString().split('T')[0],
     venc: '', condPag: '30 dias', pdf: null,
   });
   const [errors, setErrors] = useState({});
+  const [parseEstado, setParseEstado] = useState({ loading: false, message: '', detail: '' });
   const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); setErrors(e => ({ ...e, [k]: '' })); };
 
   const validate = () => {
     const e = {};
-    if (!form.obra) e.obra = 'Selecciona uma obra';
+    if (isFornecedorMateriais && !form.encomendaId) e.encomendaId = 'Escolhe a encomenda de origem';
+    if (isFornecedorMateriais && !form.obra) e.obra = 'Selecciona uma obra';
     if (!form.valor || isNaN(Number(form.valor)) || Number(form.valor) <= 0) e.valor = 'Valor inválido';
     if (!form.descricao.trim()) e.descricao = 'Campo obrigatório';
+    if (!form.pdf) e.pdf = 'É obrigatório anexar o PDF da fatura';
     return e;
+  };
+
+  const aplicarProcesso = (processoId) => {
+    const processo = processosElegiveis.find(item => item.encomendaId === processoId);
+    if (!processo) return;
+    setForm(prev => ({
+      ...prev,
+      encomendaId: processo.encomendaId,
+      obra: processo.obraId || prev.obra,
+      valor: prev.valor || String(processo.valorPrevisto || ''),
+      descricao: prev.descricao || processo.descricaoResumo || '',
+      condPag: processo.condPagamento || prev.condPag,
+    }));
+    setErrors(prev => ({ ...prev, encomendaId: '', obra: '', valor: '', descricao: '' }));
+  };
+
+  const handlePdfSelected = async (file) => {
+    if (!file) return;
+    set('pdf', file);
+    setParseEstado({ loading: true, message: 'A ler o PDF e a tentar preencher os campos...', detail: '' });
+    const parsed = await parseFornecedorInvoiceFile(file);
+    if (!parsed.ok) {
+      setParseEstado({ loading: false, message: parsed.reason || 'Não foi possível preencher automaticamente.', detail: parsed.rawText || '' });
+      return;
+    }
+    setForm(prev => ({
+      ...prev,
+      nFatura: prev.nFatura || parsed.fields.nFatura || '',
+      obra: prev.obra || parsed.fields.obra || '',
+      valor: prev.valor || (parsed.fields.valor ? String(parsed.fields.valor) : ''),
+      descricao: prev.descricao || parsed.fields.descricao || '',
+      data: prev.data || parsed.fields.data || prev.data,
+      venc: prev.venc || parsed.fields.venc || '',
+    }));
+    setParseEstado({
+      loading: false,
+      message: 'Campos lidos automaticamente do PDF. Podes rever antes de guardar.',
+      detail: parsed.rawText || '',
+    });
   };
 
   const handleRegistar = async () => {
@@ -344,11 +732,26 @@ function RegistarFaturaModal({ fornecedor, onClose, onRegistar }) {
 
         {/* Info sobre o fluxo */}
         <div style={{ margin: '16px 20px 0', padding: '10px 12px', background: 'var(--bg-info)', borderRadius: 8, borderLeft: '3px solid var(--color-info)', fontSize: 12, color: '#0a3a6a' }}>
-          📋 Ao registar, o Diretor de Produção receberá notificação por email para validar esta fatura.
+          {isFornecedorMateriais
+            ? '📋 Ao registar, a fatura fica ligada à encomenda e o Diretor de Produção recebe a validação no SIS.'
+            : '📁 Fatura de estrutura: entra diretamente no circuito financeiro, sem validação DP nem carimbo.'}
         </div>
 
         <div style={{ padding: '16px 20px' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px 16px' }}>
+            {isFornecedorMateriais && <div style={{ gridColumn: 'span 2' }}>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 5 }}>Encomenda de origem <span style={{ color: 'var(--color-danger)' }}>*</span></label>
+              <select value={form.encomendaId} onChange={e => aplicarProcesso(e.target.value)} style={inp(errors.encomendaId)}>
+                <option value="">Selecciona a encomenda...</option>
+                {processosElegiveis.map(processo => (
+                  <option key={processo.id} value={processo.encomendaId}>
+                    {processo.encomendaId} · {processo.obraId} · € {Number(processo.valorPrevisto || 0).toLocaleString('pt-PT', { minimumFractionDigits: 2 })}
+                  </option>
+                ))}
+              </select>
+              {errors.encomendaId && <div style={{ fontSize: 11, color: 'var(--color-danger)', marginTop: 4 }}>{errors.encomendaId}</div>}
+            </div>}
+
             {/* Nº fatura fornecedor */}
             <div style={{ gridColumn: 'span 2' }}>
               <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 5 }}>Nº Fatura do fornecedor</label>
@@ -359,7 +762,7 @@ function RegistarFaturaModal({ fornecedor, onClose, onRegistar }) {
             <div>
               <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 5 }}>Obra <span style={{ color: 'var(--color-danger)' }}>*</span></label>
               <select value={form.obra} onChange={e => set('obra', e.target.value)} style={inp(errors.obra)}>
-                <option value="">Selecciona...</option>
+                <option value="">{isFornecedorMateriais ? 'Selecciona...' : 'Opcional'}</option>
                 {getObrasLista().map(o => <option key={o} value={o}>{o}</option>)}
               </select>
               {errors.obra && <div style={{ fontSize: 11, color: 'var(--color-danger)', marginTop: 4 }}>{errors.obra}</div>}
@@ -402,7 +805,7 @@ function RegistarFaturaModal({ fornecedor, onClose, onRegistar }) {
             {/* PDF */}
             <div style={{ gridColumn: 'span 2' }}>
               <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 5 }}>
-                Fatura PDF <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 400 }}>opcional</span>
+                Fatura PDF <span style={{ color: 'var(--color-danger)' }}>*</span>
               </label>
               <label style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderRadius: 'var(--radius-sm)', cursor: 'pointer', border: `1.5px dashed ${form.pdf ? 'var(--color-success)' : 'var(--border-strong)'}`, background: form.pdf ? 'var(--bg-success)' : 'var(--bg-app)', transition: 'all .15s' }}>
                 <span style={{ fontSize: 20 }}>{form.pdf ? '✅' : '📎'}</span>
@@ -414,8 +817,14 @@ function RegistarFaturaModal({ fornecedor, onClose, onRegistar }) {
                   )}
                 </div>
                 {form.pdf && <button onClick={e => { e.preventDefault(); e.stopPropagation(); set('pdf', null); }} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, color: 'var(--text-muted)', padding: '2px 4px' }}>✕</button>}
-                <input type="file" accept=".pdf,.png,.jpg,.jpeg" style={{ display: 'none' }} onChange={e => { const f = e.target.files?.[0]; if (f) set('pdf', f); e.target.value = ''; }} />
+                <input type="file" accept=".pdf,.png,.jpg,.jpeg" style={{ display: 'none' }} onChange={async e => { const f = e.target.files?.[0]; if (f) await handlePdfSelected(f); e.target.value = ''; }} />
               </label>
+              {parseEstado.message && (
+                <div style={{ marginTop: 8, fontSize: 12, color: parseEstado.loading ? 'var(--brand-primary)' : 'var(--text-muted)' }}>
+                  {parseEstado.message}
+                </div>
+              )}
+              {errors.pdf && <div style={{ fontSize: 11, color: 'var(--color-danger)', marginTop: 4 }}>{errors.pdf}</div>}
             </div>
           </div>
         </div>
@@ -499,7 +908,7 @@ function EditarFaturaPanel({ fatura, titulo, descricao, reenviarLabel, onReenvia
 }
 
 // ─── MODAL DETALHE FATURA FORNECEDOR ─────────────────────────────────────────
-export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onClose, onUpdate }) {
+export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onClose, onUpdate, onDelete }) {
   const { user } = useAuth();
   const { addNotif, marcarFeita } = useNotifications();
   const [fatura, setFatura] = useState(faturaInicial);
@@ -507,14 +916,24 @@ export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onCl
   const [loading, setLoading] = useState('');
   const [pasta, setPasta]   = useState(() => loadPastaFatura(faturaInicial?.id));
   const [showAddDoc, setShowAddDoc] = useState(false);
+  const [selectedItemIds, setSelectedItemIds] = useState([]);
 
   if (!fatura) return null;
 
   const est = FATURA_CONFIG_FORN[fatura.estado] || { label: fatura.estado, cls: 'badge-n' };
   const nomeForn = typeof fornecedor === 'string' ? fornecedor : fornecedor?.nome;
+  const flow = getFornecedorFlowMeta(typeof fornecedor === 'string' ? {} : fornecedor);
+  const isFornecedorEstrutura = flow.tipo === 'estrutura';
+  const processoEncomenda = fatura.encomendaId ? loadProcessosEncomenda().find(item => item.encomendaId === fatura.encomendaId) : null;
+  const encomendaLigada = processoEncomenda ? loadEncomendaFornecedor(processoEncomenda) : (fatura.obra && fatura.encomendaId ? loadEncomendasObra(fatura.obra).find(enc => enc.id === fatura.encomendaId) : null);
+  const itensPendentesEncomenda = (encomendaLigada?.itens || []).filter(item => !(encomendaLigada?.satisfiedItemIds || []).includes(item.itemId));
   const VAL_CLS = { 'Validada': 'badge-s', 'Pendente': 'badge-w', 'Atrasada': 'badge-d' };
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 4000); };
+
+  useEffect(() => {
+    setSelectedItemIds(itensPendentesEncomenda.map(item => item.itemId));
+  }, [fatura.id, encomendaLigada?.id]);
 
   const actualizarFatura = (campos) => {
     const updated = { ...fatura, ...campos };
@@ -536,10 +955,32 @@ export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onCl
 
   // PASSO 1: DP valida → notifica LG
   const handleValidarDP = async () => {
+    if (isFornecedorEstrutura) return;
+    let satisfacao = null;
+    if (fatura.encomendaId && selectedItemIds.length > 0) {
+      satisfacao = satisfazerArtigosDaFatura({
+        fatura,
+        itemIds: selectedItemIds,
+        observacao: fatura.observacaoDP || '',
+        data: new Date().toLocaleDateString('pt-PT'),
+      });
+    }
+    const pdfValidadoDP = fatura.pdf
+      ? await generateFornecedorValidationStampedPdf({
+          fatura,
+          fornecedorNome: nomeForn,
+          validatedBy: user?.nome || 'Produção',
+        })
+      : null;
     const updated = actualizarFatura({
       validDP: 'Validada',
       estado: 'pending-lg',
       dataValidacaoDP: new Date().toLocaleDateString('pt-PT'),
+      pdfValidadoDP,
+      itens: satisfacao?.itensAssociados || fatura.itens || [],
+      itemIdsSatisfeitos: satisfacao?.novosSelecionados?.map(item => item.itemId) || fatura.itemIdsSatisfeitos || [],
+      valor: satisfacao?.totalAssociado || fatura.valor,
+      estadoEncomendaAposValidacao: satisfacao?.estadoEncomenda || fatura.estadoEncomendaAposValidacao || null,
     });
     setLoading('A notificar Leonor Gomes...');
     addNotif({
@@ -630,7 +1071,8 @@ export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onCl
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 700, color: 'var(--brand-primary)' }}>{fatura.id}</span>
               <span className={`badge ${est.cls}`}>{est.label}</span>
-              {fatura.validDP && fatura.estado === 'pending-dp' && <span className={`badge ${VAL_CLS[fatura.validDP] || 'badge-n'}`}>DP: {fatura.validDP}</span>}
+              <FornecedorTipoBadge tipo={flow.tipo} />
+              {fatura.validDP && flow.requiresDP && fatura.estado === 'pending-dp' && <span className={`badge ${VAL_CLS[fatura.validDP] || 'badge-n'}`}>DP: {fatura.validDP}</span>}
               {fatura.autorizadoMS && !fatura.concluido && <span className="badge badge-s">✓ Autorizado MS</span>}
               {fatura.concluido && <span className="badge badge-s">🏁 Concluído</span>}
             </div>
@@ -666,7 +1108,7 @@ export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onCl
               { label: 'Condições pag.',  value: fatura.condPag || '—' },
               ...(fatura.nFatura ? [{ label: 'Nº Fatura fornecedor', value: fatura.nFatura }] : []),
               ...(fatura.registadoPor ? [{ label: 'Registado por', value: fatura.registadoPor }] : []),
-              ...(fatura.dataValidacaoDP ? [{ label: 'Validado DP em', value: fatura.dataValidacaoDP }] : []),
+              ...(flow.requiresDP && fatura.dataValidacaoDP ? [{ label: 'Validado DP em', value: fatura.dataValidacaoDP }] : []),
               ...(fatura.dataAprovacaoLG ? [{ label: 'Aprovado LG em', value: fatura.dataAprovacaoLG }] : []),
               ...(fatura.dataAutorizacaoMS ? [{ label: 'Autorizado MS em', value: fatura.dataAutorizacaoMS }] : []),
               { label: 'Descrição', value: fatura.descricao, full: true },
@@ -713,7 +1155,7 @@ export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onCl
           <div style={{ borderTop: '0.5px solid var(--border)', paddingTop: 16 }}>
             <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:10 }}>
               <div style={{ fontSize:11, color:'var(--text-muted)', fontWeight:600, textTransform:'uppercase', letterSpacing:'0.04em' }}>
-                📁 Pasta da fatura <span style={{ fontWeight:400 }}>({pasta.length + (fatura.pdf ? 1 : 0) + (fatura.comprovativoPagamento ? 1 : 0) + (fatura.doc51 ? 1 : 0)})</span>
+                📁 Pasta da fatura <span style={{ fontWeight:400 }}>({pasta.length + (fatura.pdf ? 1 : 0) + (fatura.pdfValidadoDP ? 1 : 0) + (fatura.comprovativoPagamento ? 1 : 0) + (fatura.doc51 ? 1 : 0)})</span>
               </div>
               {(eCA || eLG || eMS) && (
                 <button className="btn btn-sm" style={{ fontSize:11 }} onClick={() => setShowAddDoc(true)}>+ Adicionar doc.</button>
@@ -731,6 +1173,14 @@ export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onCl
                 <span style={{ fontSize:16, opacity:0.4 }}>📎</span>
                 <span style={{ fontSize:13, color:'var(--text-muted)' }}>Sem fatura anexada</span>
               </div>
+            )}
+            {flow.requiresStamp && fatura.pdfValidadoDP && (
+              <DocPastaItem
+                doc={{ tipo:'validacao', nome: fatura.pdfValidadoDP.name || 'Versão validada DP', base64: fatura.pdfValidadoDP.base64 }}
+                podeRemover={eCA || eMS}
+                onDownload={() => downloadPdf(fatura.pdfValidadoDP)}
+                onRemover={() => { actualizarFatura({ pdfValidadoDP: null }); showToast('Versão validada removida'); }}
+              />
             )}
             {fatura.comprovativoPagamento && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: 'var(--bg-success)', borderRadius: 8, border: '0.5px solid var(--color-success)', marginBottom: 8 }}>
@@ -757,8 +1207,43 @@ export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onCl
 
           {/* ── ACÇÕES ── */}
 
+          {flow.requiresDP && encomendaLigada && fatura.validDP === 'Pendente' && (
+            <div style={{ marginTop: 16, padding: '14px', background: 'var(--bg-app)', borderRadius: 8, border: '0.5px solid var(--border)' }}>
+              <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: 8 }}>
+                Satisfação da encomenda nesta fatura
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
+                Selecciona os artigos desta encomenda que ficam satisfeitos por esta fatura. A validação DP e a satisfação passam a acontecer em conjunto.
+              </div>
+              {itensPendentesEncomenda.length === 0 ? (
+                <div style={{ fontSize: 12, color: 'var(--color-success)' }}>Todos os artigos desta encomenda já foram satisfeitos.</div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {itensPendentesEncomenda.map((item) => {
+                    const checked = selectedItemIds.includes(item.itemId);
+                    return (
+                      <label key={item.itemId} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '10px 12px', border: '0.5px solid var(--border)', borderRadius: 8, background: checked ? 'var(--bg-info)' : 'var(--bg-card)', cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => setSelectedItemIds(prev => e.target.checked ? [...prev, item.itemId] : prev.filter(id => id !== item.itemId))}
+                        />
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 13, fontWeight: 600 }}>{item.descricao}</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                            {item.fase || encomendaLigada.fase || '—'} · {item.qtd || 0} {item.unidade || 'Un.'} · {fmt(calcEncItemLiquido(item) + calcEncItemIVA(item))}
+                          </div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* PASSO 1 — DP valida */}
-          {fatura.validDP === 'Pendente' && eDP && (
+          {flow.requiresDP && fatura.validDP === 'Pendente' && eDP && (
             <AprovarRejeitarPanel
               titulo="⏳ Aguarda a tua validação"
               descricao="Confirma que os bens/serviços foram recebidos e a fatura está correcta."
@@ -768,6 +1253,10 @@ export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onCl
               anteriorLabel="Carla Almeida"
               loading={loading}
               onAprovar={async (comentario) => {
+                if (encomendaLigada && itensPendentesEncomenda.length > 0 && selectedItemIds.length === 0) {
+                  showToast('Selecciona os artigos satisfeitos nesta fatura');
+                  return;
+                }
                 if (comentario) actualizarFatura({ observacaoDP: comentario, dataObservacaoDP: new Date().toLocaleDateString('pt-PT') });
                 await handleValidarDP();
               }}
@@ -778,7 +1267,7 @@ export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onCl
               }}
             />
           )}
-          {fatura.validDP === 'Pendente' && !eDP && !fatura.estado?.includes('rejeit') && (
+          {flow.requiresDP && fatura.validDP === 'Pendente' && !eDP && !fatura.estado?.includes('rejeit') && (
             <div style={{ marginTop: 16, padding: '10px 14px', background: 'var(--bg-app)', borderRadius: 8, border: '0.5px solid var(--border)', fontSize: 12, color: 'var(--text-muted)' }}>
               🔒 Aguarda validação pelo Diretor de Produção.
               {fatura.observacaoDP && <div style={{ marginTop: 6, fontStyle: 'italic', color: 'var(--color-danger)' }}>💬 Nota DP: {fatura.observacaoDP}</div>}
@@ -786,7 +1275,7 @@ export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onCl
           )}
 
           {/* DEVOLVIDA AO CA — editar e reenviar */}
-          {fatura.estado === 'rejeitado_dp' && (eCA || eMS || eLG) && (
+          {flow.requiresDP && fatura.estado === 'rejeitado_dp' && (eCA || eMS || eLG) && (
             <EditarFaturaPanel
               fatura={fatura}
               titulo="↩ Fatura devolvida — corrige e reenvia ao DP"
@@ -802,7 +1291,7 @@ export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onCl
               }}
             />
           )}
-          {fatura.estado === 'rejeitado_dp' && !eCA && !eMS && !eLG && (
+          {flow.requiresDP && fatura.estado === 'rejeitado_dp' && !eCA && !eMS && !eLG && (
             <div style={{ marginTop: 16, padding: '10px 14px', background: 'rgba(184,50,50,0.06)', borderRadius: 8, border: '1px solid var(--color-danger)', fontSize: 12, color: 'var(--color-danger)' }}>
               ↩ Fatura devolvida.{fatura.observacaoDP ? ` Motivo: "${fatura.observacaoDP}"` : ''} Aguarda correcção pela área financeira.
             </div>
@@ -839,7 +1328,7 @@ export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onCl
           )}
 
           {/* DEVOLVIDA AO DP pela LG — DP pode aprovar directamente ou rejeitar de volta à CA */}
-          {fatura.estado === 'pending-dp' && fatura.observacaoLG && eDP && (
+          {flow.requiresDP && fatura.estado === 'pending-dp' && fatura.observacaoLG && eDP && (
             <div>
               {fatura.observacaoLG && (
                 <div style={{ marginTop: 16, padding: '10px 12px', background: 'rgba(184,50,50,0.06)', borderRadius: 8, border: '1px solid var(--color-danger)', fontSize: 12 }}>
@@ -944,16 +1433,17 @@ export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onCl
                 const updated = actualizarFatura({ comprovativoPagamento: compSer, dataPagamento: dataPag, estado: 'pago' });
                 // Mark LG payment action as done
                 if (marcarFeita) marcarFeita(fatura.id, '/fornecedores');
-                // Accionável para CA — Doc. 51
-                addNotif({
-                  tipo: 'acao_ca', icon: '🏁', accionavel: true,
-                  titulo: `Actualiza Centralgest e emite Doc. 51 — ${nomeForn}`,
-                  sub: `${nomeForn} · ${fatura.id} · Pagamento efectuado em ${dataPag}`,
-                  path: '/fornecedores',
-                  destinatario: 'ca',
-                  meta: { faturaId: fatura.id, fornecedorNome: nomeForn },
-                  acao: 'Emitir Doc. 51',
-                });
+                if (flow.requiresDP) {
+                  addNotif({
+                    tipo: 'acao_ca', icon: '🏁', accionavel: true,
+                    titulo: `Actualiza Centralgest e emite Doc. 51 — ${nomeForn}`,
+                    sub: `${nomeForn} · ${fatura.id} · Pagamento efectuado em ${dataPag}`,
+                    path: '/fornecedores',
+                    destinatario: 'ca',
+                    meta: { faturaId: fatura.id, fornecedorNome: nomeForn },
+                    acao: 'Emitir Doc. 51',
+                  });
+                }
                 // Informativa para MS
                 addNotif({
                   tipo: 'info', icon: '💶', accionavel: false,
@@ -963,7 +1453,7 @@ export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onCl
                   destinatario: 'ms',
                   meta: { faturaId: fatura.id, fornecedorNome: nomeForn },
                 });
-                showToast('Pagamento registado ✓ — Carla notificada para Doc. 51');
+                showToast(flow.requiresDP ? 'Pagamento registado ✓ — Carla notificada para Doc. 51' : 'Pagamento registado ✓');
               }}
             />
           )}
@@ -974,7 +1464,7 @@ export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onCl
           )}
 
           {/* Doc 51 na pasta (CA adiciona após pagamento) */}
-          {fatura.comprovativoPagamento && (
+          {flow.requiresDP && fatura.comprovativoPagamento && (
             <Doc51FornPanel
               fatura={fatura}
               user={user}
@@ -1044,7 +1534,8 @@ export function FaturaFornDetalheModal({ fatura: faturaInicial, fornecedor, onCl
         </div>
 
         {/* Footer */}
-        <div style={{ padding: '12px 20px', borderTop: '0.5px solid var(--border)', display: 'flex', justifyContent: 'flex-end', gap: 8, flexShrink: 0 }}>
+        <div style={{ padding: '12px 20px', borderTop: '0.5px solid var(--border)', display: 'flex', justifyContent: 'space-between', gap: 8, flexShrink: 0 }}>
+          {onDelete ? <button className="btn btn-sm" style={{ color: 'var(--color-danger)', borderColor: 'var(--color-danger)' }} onClick={() => onDelete(fatura)}>Apagar fatura</button> : <div />}
           <button className="btn btn-sm btn-primary" onClick={onClose}>Fechar</button>
         </div>
       </div>
@@ -1396,22 +1887,33 @@ function AddDocPastaForm({ onSave, onCancel }) {
   );
 }
 
-export function FornecedorModal({ f, onClose, onDelete, abrirFaturaId }) {
+export function FornecedorModal({ f, onClose, onDelete, abrirFaturaId, abrirEncomendaId }) {
   const { user } = useAuth();
   const { addNotif, marcarFeita } = useNotifications();
-  const [tab, setTab]               = useState('faturas');
+  const navigate = useNavigate();
+  const tipoFornecedor = inferFornecedorTipo(f);
+  const isFornecedorMateriais = tipoFornecedor === 'materiais';
+  const processosFornecedor = getEligibleProcessosFornecedor(f);
+  const [tab, setTab]               = useState(isFornecedorMateriais ? 'encomendas' : 'faturas');
   const [showAddDoc, setShowAddDoc] = useState(false);
   const [showRegistar, setShowRegistar] = useState(false);
   const [faturas, setFaturas]       = useState(() => loadFaturasForn(f.id, f.faturas));
   const [documentos, setDocumentos] = useState(() => loadDocumentos(f.id));
   const [faturaAberta, setFaturaAberta] = useState(null);
   const [toast, setToast]           = useState('');
+  const [encomendaAtivaId, setEncomendaAtivaId] = useState(processosFornecedor[0]?.encomendaId || '');
 
   useEffect(() => {
     if (!abrirFaturaId) return;
     const fat = faturas.find(x => x.id === abrirFaturaId);
     if (fat) setFaturaAberta(fat);
   }, [abrirFaturaId, faturas]);
+
+  useEffect(() => {
+    if (!abrirEncomendaId) return;
+    setTab('encomendas');
+    setEncomendaAtivaId(abrirEncomendaId);
+  }, [abrirEncomendaId]);
 
   // Sincronização em tempo real — quando Tesouraria actualiza sis_faturas_forn, recarrega aqui
   useEffect(() => {
@@ -1431,6 +1933,45 @@ export function FornecedorModal({ f, onClose, onDelete, abrirFaturaId }) {
 
   const pago    = faturas.filter(x => x.estado === 'pago').reduce((s, x) => s + x.valor, 0);
   const pendente = faturas.filter(x => x.estado !== 'pago').reduce((s, x) => s + x.valor, 0);
+  const encomendaAtiva = processosFornecedor.find(item => item.encomendaId === encomendaAtivaId) || processosFornecedor[0] || null;
+  const dadosEncomendaAtiva = loadEncomendaFornecedor(encomendaAtiva);
+  const faturasEncomendaAtiva = encomendaAtiva ? faturas.filter(fat => fat.encomendaId === encomendaAtiva.encomendaId) : [];
+
+  const applyInvoiceUpdate = (updatedInvoice) => {
+    if (!updatedInvoice) return;
+    setFaturas((prev) => prev.map((item) => (item.id === updatedInvoice.id ? updatedInvoice : item)));
+    setFaturaAberta((prev) => (prev?.id === updatedInvoice.id ? updatedInvoice : prev));
+  };
+
+  const handleQuickNote = (fat) => {
+    const nextNote = window.prompt('Escreve a nota ou observação para esta fatura:', fat.notasPagamento || '');
+    if (nextNote === null) return;
+    const updated = saveFornecedorInvoiceNote(f.id, fat.id, nextNote, actorName(user));
+    applyInvoiceUpdate(updated);
+    setToast('Nota guardada');
+    setTimeout(() => setToast(''), 2200);
+  };
+
+  const handleAdvanceWorkflow = (fat) => {
+    const updated = advanceFornecedorInvoiceWorkflow(f.id, fat.id, actorName(user));
+    applyInvoiceUpdate(updated);
+    setToast(`${nextActionLabelFornecedorPagamento(fat.estado)} registado`);
+    setTimeout(() => setToast(''), 2200);
+  };
+
+  const handleReturnWorkflow = (fat) => {
+    const updated = returnFornecedorInvoiceWorkflow(f.id, fat.id, actorName(user));
+    applyInvoiceUpdate(updated);
+    setToast('Fatura devolvida à etapa anterior');
+    setTimeout(() => setToast(''), 2200);
+  };
+
+  const handleRejectWorkflow = (fat) => {
+    const updated = rejectFornecedorInvoiceWorkflow(f.id, fat.id, actorName(user));
+    applyInvoiceUpdate(updated);
+    setToast('Fatura marcada como não validada');
+    setTimeout(() => setToast(''), 2200);
+  };
 
   const handleFaturaUpdate = (faturaActualizada) => {
     const updated = faturas.map(x => x.id === faturaActualizada.id ? faturaActualizada : x);
@@ -1438,16 +1979,35 @@ export function FornecedorModal({ f, onClose, onDelete, abrirFaturaId }) {
     saveFaturasForn(f.id, updated);
   };
 
+  const handleDeleteFatura = (fatura) => {
+    if (!window.confirm(`Apagar a fatura ${fatura.id}?`)) return;
+    const updated = faturas.filter((item) => item.id !== fatura.id);
+    setFaturas(updated);
+    saveFaturasForn(f.id, updated);
+    if (fatura.encomendaId) {
+      const processo = loadProcessosEncomenda().find((item) => item.encomendaId === fatura.encomendaId);
+      if (processo) {
+        updateProcessoEncomenda(processo.id, {
+          estadoWorkflow: 'aguardando_rececao_material',
+          totalFaturado: Math.max(0, Number(processo.totalFaturado || 0) - Number(fatura.valor || 0)),
+        });
+      }
+    }
+    setFaturaAberta(null);
+  };
+
   const handleRegistar = async (dados) => {
+    const flow = getFornecedorFlowMeta(f);
     const nova = {
       id: `F-SIS-${Date.now()}`,
       nFatura: dados.nFatura,
+      encomendaId: dados.encomendaId || null,
       obra: dados.obra, valor: dados.valor,
       data: new Date(dados.data).toLocaleDateString('pt-PT'),
       venc: dados.venc ? new Date(dados.venc).toLocaleDateString('pt-PT') : '—',
       condPag: dados.condPag,
-      estado: 'pending-dp',
-      validDP: 'Pendente',
+      estado: flow.initialEstado,
+      validDP: flow.initialValidDP,
       descricao: dados.descricao,
       pdf: dados.pdf,
       dataPrevisaoPagamento: dados.dataPrevisaoPagamento || null,
@@ -1457,21 +2017,37 @@ export function FornecedorModal({ f, onClose, onDelete, abrirFaturaId }) {
     const updated = [nova, ...faturas];
     setFaturas(updated);
     saveFaturasForn(f.id, updated);
+    if (dados.encomendaId) {
+      const processo = loadProcessosEncomenda().find(item => item.encomendaId === dados.encomendaId);
+      if (processo) {
+        updateProcessoEncomenda(processo.id, { estadoWorkflow: 'fatura_recebida' });
+      }
+    }
     setShowRegistar(false);
 
-    // Notificação SIS para DP
-    addNotif({
-      tipo: 'confirmar_emissao',
-      icon: '📋',
-      titulo: `Nova fatura para validação — ${f.nome}`,
-      sub: `${f.nome} · ${nova.id} · ${nova.obra} · Registada por ${user?.nome}`,
-      path: '/fornecedores',
-      destinatario: 'dp',
-      meta: { faturaId: nova.id, fornecedorNome: f.nome },
-    });
-
-    setToast('A notificar o Diretor de Produção...');
-    setToast('Fatura registada ✓ — DP notificado');
+    if (flow.requiresDP) {
+      addNotif({
+        tipo: 'confirmar_emissao',
+        icon: '📋',
+        titulo: `Nova fatura para validação — ${f.nome}`,
+        sub: `${f.nome} · ${nova.id} · ${nova.obra} · Registada por ${user?.nome}`,
+        path: '/fornecedores',
+        destinatario: 'dp',
+        meta: { faturaId: nova.id, fornecedorNome: f.nome },
+      });
+      setToast('Fatura registada ✓ — DP notificado');
+    } else {
+      addNotif({
+        tipo: 'confirmar_emissao',
+        icon: '💶',
+        titulo: `Nova fatura de estrutura — aguarda aprovação financeira`,
+        sub: `${f.nome} · ${nova.id} · ${nova.obra || 'Sem obra'} · Registada por ${user?.nome}`,
+        path: '/fornecedores',
+        destinatario: 'lg',
+        meta: { faturaId: nova.id, fornecedorNome: f.nome },
+      });
+      setToast('Fatura registada ✓ — Financeiro notificado');
+    }
     setTimeout(() => setToast(''), 5000);
   };
 
@@ -1495,10 +2071,10 @@ export function FornecedorModal({ f, onClose, onDelete, abrirFaturaId }) {
     <>
       {showRegistar && <RegistarFaturaModal fornecedor={f} onClose={() => setShowRegistar(false)} onRegistar={handleRegistar} />}
       {showAddDoc && <AdicionarDocumentoModal entidade={f} tipoEntidade="fornecedor" onClose={() => setShowAddDoc(false)} onSave={handleAddDoc} />}
-      {faturaAberta && <FaturaFornDetalheModal fatura={faturaAberta} fornecedor={f} onClose={() => setFaturaAberta(null)} onUpdate={handleFaturaUpdate} />}
+      {faturaAberta && <FaturaFornDetalheModal fatura={faturaAberta} fornecedor={f} onClose={() => setFaturaAberta(null)} onUpdate={handleFaturaUpdate} onDelete={handleDeleteFatura} />}
 
       <div onClick={undefined} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 400, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1.5rem' }}>
-        <div style={{ background: 'var(--bg-card)', borderRadius: 'var(--radius-lg)', border: '0.5px solid var(--border)', width: '100%', maxWidth: 720, maxHeight: '88vh', display: 'flex', flexDirection: 'column', boxShadow: '0 16px 48px rgba(0,0,0,0.2)', position: 'relative' }}>
+        <div style={{ background: 'var(--bg-card)', borderRadius: 'var(--radius-lg)', border: '0.5px solid var(--border)', width: '96vw', maxWidth: 1180, maxHeight: '88vh', display: 'flex', flexDirection: 'column', boxShadow: '0 16px 48px rgba(0,0,0,0.2)', position: 'relative' }}>
           {toast && (
             <div style={{ position: 'absolute', top: 16, left: '50%', transform: 'translateX(-50%)', background: 'var(--color-success)', color: '#fff', padding: '8px 18px', borderRadius: 8, fontSize: 13, fontWeight: 500, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 10, whiteSpace: 'nowrap' }}>{toast}</div>
           )}
@@ -1509,7 +2085,10 @@ export function FornecedorModal({ f, onClose, onDelete, abrirFaturaId }) {
               <div style={{ width: 44, height: 44, borderRadius: 12, background: 'var(--brand-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, fontWeight: 700, color: '#fff', flexShrink: 0 }}>{f.nome.charAt(0)}</div>
               <div>
                 <div style={{ fontSize: 17, fontWeight: 700 }}>{f.nome}</div>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{f.categoria} · NIF {f.nif}</div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <span>{f.categoria} · NIF {f.nif}</span>
+                  <FornecedorTipoBadge tipo={tipoFornecedor} />
+                </div>
               </div>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -1526,7 +2105,7 @@ export function FornecedorModal({ f, onClose, onDelete, abrirFaturaId }) {
               { label: 'Total faturas', value: faturas.length },
               { label: 'Total pago',    value: fmt(pago),     color: 'var(--color-success)' },
               { label: 'Pendente',      value: fmt(pendente), color: pendente > 0 ? 'var(--color-warning)' : undefined },
-              { label: 'Obras',         value: f.obras.length > 0 ? f.obras.join(', ') : '—' },
+              { label: isFornecedorMateriais ? 'Encomendas' : 'Pastas', value: isFornecedorMateriais ? processosFornecedor.length : faturas.length },
             ].map(k => (
               <div key={k.label} style={{ background: 'var(--bg-app)', padding: '10px 16px' }}>
                 <div style={{ fontSize: 10, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 3 }}>{k.label}</div>
@@ -1538,7 +2117,7 @@ export function FornecedorModal({ f, onClose, onDelete, abrirFaturaId }) {
           {/* Tabs */}
           <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', flexShrink: 0, padding: '0 22px' }}>
             {[
-              { key: 'faturas',    label: `Faturas (${faturas.length})` },
+              ...(isFornecedorMateriais ? [{ key: 'encomendas', label: `Encomendas (${processosFornecedor.length})` }] : [{ key: 'faturas', label: `Faturas (${faturas.length})` }]),
               { key: 'documentos', label: `Documentos (${documentos.length})` },
               { key: 'info',       label: 'Informações' },
             ].map(t => (
@@ -1548,6 +2127,167 @@ export function FornecedorModal({ f, onClose, onDelete, abrirFaturaId }) {
 
           {/* Body */}
           <div style={{ flex: 1, overflowY: 'auto' }}>
+            {tab === 'encomendas' && isFornecedorMateriais && (
+              <div style={{ padding: '18px 22px' }}>
+                {processosFornecedor.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)', fontSize: 13 }}>
+                    Sem encomendas deste fornecedor. Elas aparecem aqui quando são criadas na ficha de obra.
+                  </div>
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr', gap: 16, alignItems: 'start' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {processosFornecedor.map((processo) => {
+                        const encomenda = loadEncomendaFornecedor(processo);
+                        const estadoEnc = formatEncomendaEstado(encomenda?.estado);
+                        const isActive = (encomendaAtiva?.encomendaId || '') === processo.encomendaId;
+                        return (
+                          <button
+                            key={processo.id}
+                            onClick={() => setEncomendaAtivaId(processo.encomendaId)}
+                            style={{
+                              textAlign: 'left',
+                              padding: '12px 14px',
+                              borderRadius: 10,
+                              border: `1px solid ${isActive ? 'var(--brand-primary)' : 'var(--border)'}`,
+                              background: isActive ? 'rgba(28,58,94,0.05)' : 'var(--bg-app)',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'flex-start' }}>
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--brand-primary)', fontWeight: 700 }}>{processo.encomendaId}</div>
+                                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3 }}>{processo.obraId} · {processo.fasePrincipal || 'Sem fase'}</div>
+                              </div>
+                              <span className={`badge ${estadoEnc.cls}`}>{estadoEnc.label}</span>
+                            </div>
+                            <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 8, lineHeight: 1.5 }}>{processo.descricaoResumo || 'Sem resumo de materiais'}</div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 10, fontSize: 12, color: 'var(--text-muted)' }}>
+                              <span>{fmt(processo.valorPrevisto || 0)}</span>
+                              <span>{faturas.filter(fat => fat.encomendaId === processo.encomendaId).length} fatura(s)</span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {encomendaAtiva && (
+                      <div className="card" style={{ padding: 18 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 12 }}>
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: 16 }}>{encomendaAtiva.encomendaId}</div>
+                            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3 }}>
+                              {encomendaAtiva.obraId} · {encomendaAtiva.fasePrincipal || 'Sem fase'} · Emitida em {dadosEncomendaAtiva?.documentoGeradoEm || encomendaAtiva.documentoGeradoEm || '—'}
+                            </div>
+                          </div>
+                          <button className="btn btn-sm" onClick={() => setShowRegistar(true)}>+ Registar fatura</button>
+                        </div>
+
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 10, marginBottom: 16 }}>
+                          <div style={{ padding: '10px 12px', background: 'var(--bg-app)', borderRadius: 8 }}>
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 700 }}>Nota de encomenda</div>
+                            <div style={{ fontSize: 13, marginTop: 4 }}>{dadosEncomendaAtiva?.documentoGeradoEm ? 'Disponível na ficha de obra' : 'Ainda sem documento'}</div>
+                          </div>
+                          <div style={{ padding: '10px 12px', background: 'var(--bg-app)', borderRadius: 8 }}>
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 700 }}>Estado de satisfação</div>
+                            <div style={{ fontSize: 13, marginTop: 4 }}>{formatEncomendaEstado(dadosEncomendaAtiva?.estado).label}</div>
+                          </div>
+                          <div style={{ padding: '10px 12px', background: 'var(--bg-app)', borderRadius: 8 }}>
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 700 }}>Pasta de faturas</div>
+                            <div style={{ fontSize: 13, marginTop: 4 }}>{faturasEncomendaAtiva.length} documento(s)</div>
+                          </div>
+                        </div>
+
+                        <div style={{ marginBottom: 14 }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: 8 }}>Listagem de materiais</div>
+                          {!dadosEncomendaAtiva?.itens?.length ? (
+                            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Sem listagem de materiais disponível.</div>
+                          ) : (
+                            <table className="sis-table">
+                              <thead>
+                                <tr><th>Descrição</th><th>Ref.</th><th>Fase</th><th>Qtd.</th><th>Total</th></tr>
+                              </thead>
+                              <tbody>
+                                {dadosEncomendaAtiva.itens.map((item, idx) => (
+                                  <tr key={`${item.ref || item.descricao}-${idx}`}>
+                                    <td>{item.descricao || '—'}</td>
+                                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{item.ref || '—'}</td>
+                                    <td>{item.fase || '—'}</td>
+                                    <td>{item.qtd || 0} {item.unidade || ''}</td>
+                                    <td>{fmt((Number(item.preco) || 0) * (Number(item.qtd) || 1))}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          )}
+                        </div>
+
+                        <div>
+                          <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: 8 }}>Faturas da encomenda</div>
+                          {faturasEncomendaAtiva.length === 0 ? (
+                            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Ainda não existem faturas ligadas a esta encomenda.</div>
+                          ) : (
+                            <table className="sis-table">
+                              <thead>
+                                <tr>
+                                  <th>Data Sit.</th>
+                                  <th>Doc.</th>
+                                  <th>Descrição</th>
+                                  <th style={{ textAlign: 'right' }}>Valor</th>
+                                  <th>Info</th>
+                                  <th>Ações</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {faturasEncomendaAtiva.map((fat) => (
+                                  <tr key={fat.id}>
+                                    <td style={{ whiteSpace: 'nowrap' }}>{formatFornecedorPaymentDate(fat.data)}</td>
+                                    <td>
+                                      <div style={{ fontWeight: 600, color: 'var(--brand-primary)', cursor: 'pointer' }} onClick={() => setFaturaAberta(fat)}>
+                                        {fat.nFatura || fat.id}
+                                      </div>
+                                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                                        {getFornecedorInvoiceDocs(fat).slice(0, 2).map((doc) => (
+                                          <button key={doc.key} className="btn btn-sm" onClick={() => downloadFornecedorPaymentDoc(doc)}>{doc.label}</button>
+                                        ))}
+                                      </div>
+                                    </td>
+                                    <td>
+                                      <div style={{ fontWeight: 600 }}>{fat.descricao || 'Sem descrição'}</div>
+                                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>{fat.obra || encomendaAtiva.obraId || 'Sem obra'} · {encomendaAtiva.fasePrincipal || 'Sem fase'}</div>
+                                    </td>
+                                    <td style={{ textAlign: 'right' }}>
+                                      <div style={{ fontWeight: 700 }}>{fmt(fat.valor)}</div>
+                                      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>Venc. {formatFornecedorPaymentDate(fat.venc)}</div>
+                                    </td>
+                                    <td>
+                                      <div><span className={`badge ${statusMetaFornecedorPagamento(fat.estado).cls}`}>{statusMetaFornecedorPagamento(fat.estado).label}</span></div>
+                                      <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 6 }}>{getFornecedorWorkflowMemory(fat)[0]?.label || 'Sem memória'}</div>
+                                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>{fat.notasPagamento ? fat.notasPagamento.slice(0, 60) : 'Sem observações registadas'}</div>
+                                    </td>
+                                    <td>
+                                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                        <SmallFornecedorAction title="Memória / detalhes" onClick={() => setFaturaAberta(fat)}>i</SmallFornecedorAction>
+                                        <SmallFornecedorAction title="Guardar nota rápida" onClick={() => handleQuickNote(fat)}>✎</SmallFornecedorAction>
+                                        <SmallFornecedorAction title="Mandar para a pessoa anterior" onClick={() => handleReturnWorkflow(fat)}>↩</SmallFornecedorAction>
+                                        <SmallFornecedorAction title="Não validar" danger onClick={() => handleRejectWorkflow(fat)}>✕</SmallFornecedorAction>
+                                        {!['pago', 'concluido'].includes(fat.estado) && (
+                                          <SmallFornecedorAction title={nextActionLabelFornecedorPagamento(fat.estado)} primary onClick={() => handleAdvanceWorkflow(fat)}>✓</SmallFornecedorAction>
+                                        )}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             {tab === 'faturas' && (
               faturas.length === 0 ? (
                 <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)', fontSize: 13 }}>
@@ -1556,25 +2296,59 @@ export function FornecedorModal({ f, onClose, onDelete, abrirFaturaId }) {
               ) : (
                 <table className="sis-table">
                   <thead>
-                    <tr><th>Nº Fatura</th><th>Descrição</th><th>Obra</th><th style={{ textAlign: 'right' }}>Valor</th><th>Data</th><th>Valid. DP</th><th>Estado</th><th>Docs</th></tr>
+                    <tr>
+                      <th>Data Sit.</th>
+                      <th>Doc.</th>
+                      <th>Fornecedor / Descrição</th>
+                      <th style={{ textAlign: 'right' }}>Valor</th>
+                      <th>Info</th>
+                      <th>Ações</th>
+                    </tr>
                   </thead>
                   <tbody>
                     {faturas.map(fat => (
-                      <tr key={fat.id} onClick={() => setFaturaAberta(fat)} style={{ cursor: 'pointer' }}>
-                        <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--brand-primary)', fontWeight: 500 }}>{fat.id}</td>
-                        <td style={{ fontSize: 13, maxWidth: 160 }}>{fat.descricao}</td>
-                        <td><span className="badge badge-n">{fat.obra}</span></td>
-                        <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmt(fat.valor)}</td>
-                        <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{fat.data}</td>
+                      <tr key={fat.id}>
+                        <td style={{ whiteSpace: 'nowrap' }}>{formatFornecedorPaymentDate(fat.data)}</td>
                         <td>
-                          {fat.validDP && <span className={`badge ${fat.validDP === 'Validada' ? 'badge-s' : fat.validDP === 'Atrasada' ? 'badge-d' : 'badge-w'}`}>{fat.validDP}</span>}
+                          <div style={{ fontWeight: 600, color: 'var(--brand-primary)', cursor: 'pointer' }} onClick={() => setFaturaAberta(fat)}>
+                            {fat.nFatura || fat.id}
+                          </div>
+                          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>{getFornecedorInvoiceDocs(fat).length} doc.</div>
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                            {getFornecedorInvoiceDocs(fat).map((doc) => (
+                              <button key={doc.key} className="btn btn-sm" onClick={() => downloadFornecedorPaymentDoc(doc)}>{doc.label}</button>
+                            ))}
+                          </div>
                         </td>
-                        <td><span className={`badge ${FATURA_CONFIG_FORN[fat.estado]?.cls || 'badge-n'}`}>{FATURA_CONFIG_FORN[fat.estado]?.label}</span></td>
-                        <td style={{ fontSize: 15 }}>
-                          <div style={{ display: 'flex', gap: 3 }}>
-                            {fat.pdf && <span title="Fatura">📄</span>}
-                            {fat.comprovativoPagamento && <span title="Comprovativo">✅</span>}
-                            {!fat.pdf && !fat.comprovativoPagamento && <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>—</span>}
+                        <td>
+                          <div style={{ fontWeight: 600 }}>{f.nome}</div>
+                          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3 }}>{fat.descricao || 'Sem descrição'}</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 5 }}>{fat.obra || 'Sem obra'} · {f.categoria || '—'}</div>
+                        </td>
+                        <td style={{ textAlign: 'right' }}>
+                          <div style={{ fontWeight: 700 }}>{fmt(fat.valor)}</div>
+                          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>Venc. {formatFornecedorPaymentDate(fat.venc)}</div>
+                        </td>
+                        <td>
+                          <div><span className={`badge ${statusMetaFornecedorPagamento(fat.estado).cls}`}>{statusMetaFornecedorPagamento(fat.estado).label}</span></div>
+                          <div style={{ fontSize: 12, marginTop: 6, color: 'var(--text-secondary)' }}>{getFornecedorWorkflowMemory(fat)[0]?.label || 'Sem memória'}</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>{fat.notasPagamento ? fat.notasPagamento.slice(0, 60) : 'Sem observações registadas'}</div>
+                        </td>
+                        <td>
+                          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                            <SmallFornecedorAction title="Memória / detalhes" onClick={() => setFaturaAberta(fat)}>i</SmallFornecedorAction>
+                            <SmallFornecedorAction title="Guardar nota rápida" onClick={() => handleQuickNote(fat)}>✎</SmallFornecedorAction>
+                            <SmallFornecedorAction title="Mandar para a pessoa anterior" onClick={() => handleReturnWorkflow(fat)}>↩</SmallFornecedorAction>
+                            <SmallFornecedorAction title="Não validar" danger onClick={() => handleRejectWorkflow(fat)}>✕</SmallFornecedorAction>
+                            {!['pago', 'concluido'].includes(fat.estado) && (
+                              <SmallFornecedorAction title={nextActionLabelFornecedorPagamento(fat.estado)} primary onClick={() => handleAdvanceWorkflow(fat)}>✓</SmallFornecedorAction>
+                            )}
+                            <button
+                              className="btn btn-sm"
+                              onClick={() => navigate('/pagamentos', { state: { abrirPagamentoForn: { fornecedorId: f.id, faturaId: fat.id } } })}
+                            >
+                              Abrir
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -1612,7 +2386,9 @@ export function FornecedorModal({ f, onClose, onDelete, abrirFaturaId }) {
               <div style={{ padding: '20px 22px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px 24px' }}>
                 {[
                   { label: 'Razão social', value: f.nome }, { label: 'NIF', value: f.nif },
-                  { label: 'Categoria', value: f.categoria }, { label: 'Contacto', value: f.contacto },
+                  { label: 'Tipo', value: FORNECEDOR_TIPOS[tipoFornecedor]?.label || '—' }, { label: 'Categoria', value: f.categoria },
+                  { label: 'Mercado', value: f.classificacaoMercado || 'Nacional' },
+                  { label: 'Contacto', value: f.contacto },
                   { label: 'Email', value: f.email }, { label: 'Telefone', value: f.telefone },
                   { label: 'Morada', value: f.morada }, { label: 'Obras', value: f.obras.join(', ') || '—' },
                 ].map(item => (
@@ -1627,7 +2403,7 @@ export function FornecedorModal({ f, onClose, onDelete, abrirFaturaId }) {
 
           {/* Footer */}
           <div style={{ padding: '12px 22px', borderTop: '0.5px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
-            {f._userCreated ? <button className="btn btn-sm" style={{ color: 'var(--color-danger)', borderColor: 'var(--color-danger)' }} onClick={() => onDelete && onDelete(f.id)}>Remover fornecedor</button> : <div />}
+            <button className="btn btn-sm" style={{ color: 'var(--color-danger)', borderColor: 'var(--color-danger)' }} onClick={() => onDelete && onDelete(f.id)}>Remover fornecedor</button>
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="btn btn-sm btn-primary" onClick={onClose}>Fechar</button>
             </div>
@@ -1641,6 +2417,8 @@ export function FornecedorModal({ f, onClose, onDelete, abrirFaturaId }) {
 // ─── MODAL NOVO FORNECEDOR ────────────────────────────────────────────────────
 const CAMPOS = [
   { key: 'nome', label: 'Razão social', required: true, half: false },
+  { key: 'tipoFornecedor', label: 'Tipo de fornecedor', required: true, half: true, type: 'select-tipo' },
+  { key: 'classificacaoMercado', label: 'Classificação', required: true, half: true, type: 'select-mercado' },
   { key: 'nif', label: 'NIF', required: true, half: true },
   { key: 'categoria', label: 'Categoria', required: true, half: true, type: 'select' },
   { key: 'contacto', label: 'Contacto', required: false, half: true },
@@ -1653,20 +2431,91 @@ const CAMPOS = [
 function NovaFaturaGlobalModal({ fornecedores, onClose, onRegistar, addNotif }) {
   const [fornId, setFornId] = useState('');
   const [form, setForm] = useState({
-    nFatura: '', obra: '', valor: '', descricao: '',
+    encomendaId: '', nFatura: '', obra: '', valor: '', descricao: '',
     data: new Date().toISOString().split('T')[0],
     venc: '', condPag: '30 dias', pdf: null,
   });
   const [errors, setErrors] = useState({});
+  const [parseEstado, setParseEstado] = useState({ loading: false, message: '' });
   const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); setErrors(e => ({ ...e, [k]: '' })); };
+  const processosFornecedor = fornId ? getEligibleProcessosFornecedor(fornecedores.find(f => f.id === fornId)) : [];
+  const fornecedorSelecionado = fornecedores.find(f => f.id === fornId);
+  const isFornecedorMateriais = inferFornecedorTipo(fornecedorSelecionado || {}) === 'materiais';
 
   const validate = () => {
     const e = {};
     if (!fornId) e.forn = 'Selecciona um fornecedor';
-    if (!form.obra) e.obra = 'Selecciona uma obra';
+    if (isFornecedorMateriais && !form.encomendaId) e.encomendaId = 'Selecciona a encomenda';
+    if (isFornecedorMateriais && !form.obra) e.obra = 'Selecciona uma obra';
     if (!form.valor || isNaN(Number(form.valor)) || Number(form.valor) <= 0) e.valor = 'Valor inválido';
     if (!form.descricao.trim()) e.descricao = 'Campo obrigatório';
+    if (!form.pdf) e.pdf = 'É obrigatório anexar o PDF da fatura';
     return e;
+  };
+
+  const applyFornecedor = (nextFornId) => {
+    setFornId(nextFornId);
+    setErrors(er => ({ ...er, forn: '' }));
+  };
+
+  const applyProcesso = (encomendaId, forcedFornecedorId = fornId) => {
+    const fornecedor = fornecedores.find(f => f.id === forcedFornecedorId);
+    const processo = getEligibleProcessosFornecedor(fornecedor).find(item => item.encomendaId === encomendaId);
+    if (!processo) return;
+    setForm(prev => ({
+      ...prev,
+      encomendaId: processo.encomendaId,
+      obra: processo.obraId || prev.obra,
+      valor: prev.valor || String(processo.valorPrevisto || ''),
+      descricao: prev.descricao || processo.descricaoResumo || '',
+      condPag: processo.condPagamento || prev.condPag,
+    }));
+    setErrors(prev => ({ ...prev, encomendaId: '', obra: '', valor: '', descricao: '' }));
+  };
+
+  const handlePdfSelected = async (file) => {
+    if (!file) return;
+    set('pdf', file);
+    setParseEstado({ loading: true, message: 'A ler o PDF e a procurar fornecedor, encomenda e campos...' });
+    const parsed = await parseFornecedorInvoiceFile(file);
+    if (!parsed.ok) {
+      setParseEstado({ loading: false, message: parsed.reason || 'Não foi possível identificar a fatura automaticamente.' });
+      return;
+    }
+
+    const fornecedor = findFornecedorFromPdf(parsed, fornecedores);
+    const valorLido = parsed.fields.valor ? String(parsed.fields.valor) : '';
+    const fornecedorIdDetetado = fornecedor?.id || '';
+    if (fornecedorIdDetetado) applyFornecedor(fornecedorIdDetetado);
+
+    let processo = null;
+    if (fornecedor?.nome && parsed.fields.valor) {
+      processo = findBestProcessoForValor(fornecedor.nome, parsed.fields.valor);
+      if (processo?.encomendaId) {
+        applyProcesso(processo.encomendaId, fornecedorIdDetetado);
+      }
+    }
+
+    setForm(prev => ({
+      ...prev,
+      pdf: file,
+      encomendaId: processo?.encomendaId || prev.encomendaId,
+      nFatura: prev.nFatura || parsed.fields.nFatura || '',
+      obra: prev.obra || parsed.fields.obra || processo?.obraId || '',
+      valor: prev.valor || valorLido,
+      descricao: prev.descricao || parsed.fields.descricao || processo?.descricaoResumo || '',
+      data: prev.data || parsed.fields.data || prev.data,
+      venc: prev.venc || parsed.fields.venc || '',
+    }));
+
+    setParseEstado({
+      loading: false,
+      message: fornecedor && processo
+        ? 'Fornecedor e encomenda sugeridos automaticamente a partir do PDF.'
+        : fornecedor
+          ? 'Fornecedor identificado no PDF. Revê a encomenda sugerida.'
+          : 'Campos lidos do PDF. Falta confirmar fornecedor/encomenda.',
+    });
   };
 
   const handleRegistar = async () => {
@@ -1685,7 +2534,9 @@ function NovaFaturaGlobalModal({ fornecedores, onClose, onRegistar, addNotif }) 
         <div style={{ padding: '16px 20px', borderBottom: '0.5px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
             <div style={{ fontWeight: 600, fontSize: 15 }}>Nova fatura</div>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>O DP receberá notificação para validar</div>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+              {isFornecedorMateriais ? 'O DP receberá notificação para validar' : 'A fatura segue diretamente para aprovação financeira'}
+            </div>
           </div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: 'var(--text-muted)' }}>✕</button>
         </div>
@@ -1696,7 +2547,7 @@ function NovaFaturaGlobalModal({ fornecedores, onClose, onRegistar, addNotif }) 
             <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 5 }}>
               Fornecedor <span style={{ color: 'var(--color-danger)' }}>*</span>
             </label>
-            <select value={fornId} onChange={e => { setFornId(e.target.value); setErrors(er => ({ ...er, forn: '' })); }}
+            <select value={fornId} onChange={e => applyFornecedor(e.target.value)}
               style={{ ...inp(errors.forn), width: '100%' }}>
               <option value="">Selecciona o fornecedor...</option>
               {[...fornecedores].sort((a,b) => a.nome.localeCompare(b.nome)).map(f => (
@@ -1705,6 +2556,22 @@ function NovaFaturaGlobalModal({ fornecedores, onClose, onRegistar, addNotif }) 
             </select>
             {errors.forn && <div style={{ fontSize: 11, color: 'var(--color-danger)', marginTop: 4 }}>{errors.forn}</div>}
           </div>
+
+          {isFornecedorMateriais && <div style={{ marginBottom: 16 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 5 }}>
+              Encomenda <span style={{ color: 'var(--color-danger)' }}>*</span>
+            </label>
+            <select value={form.encomendaId} onChange={e => applyProcesso(e.target.value)}
+              style={{ ...inp(errors.encomendaId), width: '100%' }} disabled={!fornId}>
+              <option value="">{fornId ? 'Selecciona a encomenda...' : 'Escolhe primeiro o fornecedor...'}</option>
+              {processosFornecedor.map(processo => (
+                <option key={processo.id} value={processo.encomendaId}>
+                  {processo.encomendaId} · {processo.obraId} · € {Number(processo.valorPrevisto || 0).toLocaleString('pt-PT', { minimumFractionDigits: 2 })}
+                </option>
+              ))}
+            </select>
+            {errors.encomendaId && <div style={{ fontSize: 11, color: 'var(--color-danger)', marginTop: 4 }}>{errors.encomendaId}</div>}
+          </div>}
 
           {/* Formulário (igual ao RegistarFaturaModal) */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px 16px' }}>
@@ -1715,7 +2582,7 @@ function NovaFaturaGlobalModal({ fornecedores, onClose, onRegistar, addNotif }) 
             <div>
               <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 5 }}>Obra <span style={{ color: 'var(--color-danger)' }}>*</span></label>
               <select value={form.obra} onChange={e => set('obra', e.target.value)} style={inp(errors.obra)}>
-                <option value="">Selecciona...</option>
+                <option value="">{isFornecedorMateriais ? 'Selecciona...' : 'Opcional'}</option>
                 {getObrasLista().map(o => <option key={o} value={o}>{o}</option>)}
               </select>
               {errors.obra && <div style={{ fontSize: 11, color: 'var(--color-danger)', marginTop: 4 }}>{errors.obra}</div>}
@@ -1746,7 +2613,7 @@ function NovaFaturaGlobalModal({ fornecedores, onClose, onRegistar, addNotif }) 
             </div>
             <div style={{ gridColumn: 'span 2' }}>
               <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 5 }}>
-                Fatura PDF <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 400 }}>opcional</span>
+                Fatura PDF <span style={{ color: 'var(--color-danger)' }}>*</span>
               </label>
               <label style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderRadius: 'var(--radius-sm)', cursor: 'pointer', border: `1.5px dashed ${form.pdf ? 'var(--color-success)' : 'var(--border-strong)'}`, background: form.pdf ? 'var(--bg-success)' : 'var(--bg-app)', transition: 'all .15s' }}>
                 <span style={{ fontSize: 20 }}>{form.pdf ? '✅' : '📎'}</span>
@@ -1755,8 +2622,14 @@ function NovaFaturaGlobalModal({ fornecedores, onClose, onRegistar, addNotif }) 
                     : <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Anexa a fatura do fornecedor</div>}
                 </div>
                 {form.pdf && <button onClick={e => { e.preventDefault(); e.stopPropagation(); set('pdf', null); }} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, color: 'var(--text-muted)', padding: '2px 4px' }}>✕</button>}
-                <input type="file" accept=".pdf,.png,.jpg,.jpeg" style={{ display: 'none' }} onChange={e => { const f = e.target.files?.[0]; if (f) set('pdf', f); e.target.value = ''; }} />
+                <input type="file" accept=".pdf,.png,.jpg,.jpeg" style={{ display: 'none' }} onChange={async e => { const f = e.target.files?.[0]; if (f) await handlePdfSelected(f); e.target.value = ''; }} />
               </label>
+              {parseEstado.message && (
+                <div style={{ marginTop: 8, fontSize: 12, color: parseEstado.loading ? 'var(--brand-primary)' : 'var(--text-muted)' }}>
+                  {parseEstado.message}
+                </div>
+              )}
+              {errors.pdf && <div style={{ fontSize: 11, color: 'var(--color-danger)', marginTop: 4 }}>{errors.pdf}</div>}
             </div>
           </div>
         </div>
@@ -1771,12 +2644,14 @@ function NovaFaturaGlobalModal({ fornecedores, onClose, onRegistar, addNotif }) 
 }
 
 function NovoFornecedorModal({ onClose, onSave }) {
-  const [form, setForm] = useState({ nome:'', nif:'', categoria:'', contacto:'', email:'', telefone:'', morada:'' });
+  const [form, setForm] = useState({ nome:'', tipoFornecedor:'estrutura', classificacaoMercado:'Nacional', nif:'', categoria:'', contacto:'', email:'', telefone:'', morada:'' });
   const [errors, setErrors] = useState({});
   const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); setErrors(e => ({ ...e, [k]: '' })); };
   const validate = () => {
     const e = {};
     if (!form.nome.trim()) e.nome = 'Campo obrigatório';
+    if (!form.tipoFornecedor) e.tipoFornecedor = 'Selecciona um tipo';
+    if (!form.classificacaoMercado) e.classificacaoMercado = 'Selecciona uma classificação';
     if (!form.nif.trim()) e.nif = 'Campo obrigatório';
     else if (!/^\d{9}$/.test(form.nif.replace(/[\s\-]/g, ''))) e.nif = 'NIF inválido';
     if (!form.categoria) e.categoria = 'Selecciona uma categoria';
@@ -1802,6 +2677,14 @@ function NovoFornecedorModal({ onClose, onSave }) {
                   <option value="">Selecciona...</option>
                   {CATS.map(cat => <option key={cat} value={cat}>{cat}</option>)}
                 </select>
+              ) : c.type === 'select-tipo' ? (
+                <select value={form[c.key]} onChange={e => set(c.key, e.target.value)} style={{ width:'100%', fontFamily:'var(--font-body)', fontSize:13, padding:'7px 10px', border:`0.5px solid ${errors[c.key] ? 'var(--color-danger)' : 'var(--border-strong)'}`, borderRadius:'var(--radius-sm)', background:'var(--bg-card)', color:'var(--text-primary)', outline:'none' }}>
+                  {Object.entries(FORNECEDOR_TIPOS).map(([key, cfg]) => <option key={key} value={key}>{cfg.label}</option>)}
+                </select>
+              ) : c.type === 'select-mercado' ? (
+                <select value={form[c.key]} onChange={e => set(c.key, e.target.value)} style={{ width:'100%', fontFamily:'var(--font-body)', fontSize:13, padding:'7px 10px', border:`0.5px solid ${errors[c.key] ? 'var(--color-danger)' : 'var(--border-strong)'}`, borderRadius:'var(--radius-sm)', background:'var(--bg-card)', color:'var(--text-primary)', outline:'none' }}>
+                  {MERCADOS_ENTIDADE.map(item => <option key={item} value={item}>{item}</option>)}
+                </select>
               ) : (
                 <input value={form[c.key]} onChange={e => set(c.key, e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSave()} style={{ width:'100%', fontFamily:'var(--font-body)', fontSize:13, padding:'7px 10px', border:`0.5px solid ${errors[c.key] ? 'var(--color-danger)' : 'var(--border-strong)'}`, borderRadius:'var(--radius-sm)', background:'var(--bg-card)', color:'var(--text-primary)', outline:'none', boxSizing:'border-box' }} />
               )}
@@ -1821,17 +2704,21 @@ function NovoFornecedorModal({ onClose, onSave }) {
 // ─── GALERIA ──────────────────────────────────────────────────────────────────
 export default function FornecedoresPage() {
   const location = useLocation();
+  const navigate = useNavigate();
   const { user } = useAuth();
   const { addNotif, marcarFeita } = useNotifications();
   const [search, setSearch]       = useState('');
   const [categoria, setCategoria] = useState('Todas');
+  const [tipoFiltro, setTipoFiltro] = useState('todos');
   const [extras, setExtras]       = useState(loadExtras);
   const [showNovo, setShowNovo]   = useState(false);
   const [showNovaFatura, setShowNovaFatura] = useState(false);
   const [vistaForn, setVistaForn] = useState('galeria'); // 'galeria' | 'tabela'
   const [selected, setSelected]   = useState(null);
   const [abrirFaturaId, setAbrirFaturaId] = useState(null);
+  const [abrirEncomendaId, setAbrirEncomendaId] = useState(null);
   const [toast, setToast]         = useState('');
+  const [processos, setProcessos] = useState(() => loadProcessosEncomenda());
   const canEditFornecedores = canEditModule(user, 'fornecedores');
 
   const allForn = mergeFornecedoresData(extras);
@@ -1858,9 +2745,23 @@ export default function FornecedoresPage() {
     window.history.replaceState({}, '');
   }, [location.state]);
 
+  useEffect(() => {
+    const sync = () => setProcessos(loadProcessosEncomenda());
+    const onStorage = (e) => {
+      if (e.key === 'sis_processos_encomenda') sync();
+    };
+    const onProcessos = () => sync();
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('sis_processos_encomenda_updated', onProcessos);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('sis_processos_encomenda_updated', onProcessos);
+    };
+  }, []);
+
   const handleSave = (form) => {
     if (!canEditFornecedores) return;
-    const novo = { id: 'u_' + Date.now(), nome: form.nome, nif: form.nif, categoria: form.categoria, contacto: form.contacto || '—', email: form.email || '—', telefone: form.telefone || '—', morada: form.morada || '—', obras: [], totalFaturas: 0, totalPago: 0, pendente: 0, estado: 'ativo', faturas: [], _userCreated: true };
+    const novo = { id: 'u_' + Date.now(), nome: form.nome, tipoFornecedor: form.tipoFornecedor, classificacaoMercado: form.classificacaoMercado, nif: form.nif, categoria: form.categoria, contacto: form.contacto || '—', email: form.email || '—', telefone: form.telefone || '—', morada: form.morada || '—', obras: [], totalFaturas: 0, totalPago: 0, pendente: 0, estado: 'ativo', faturas: [], _userCreated: true };
     const updated = [...extras, novo];
     setExtras(updated); saveExtras(updated);
     setShowNovo(false);
@@ -1873,20 +2774,125 @@ export default function FornecedoresPage() {
     if (!window.confirm('Remover este fornecedor?')) return;
     const updated = extras.filter(f => f.id !== id);
     setExtras(updated); saveExtras(updated);
+    if (FORNECEDORES_DATA.some((fornecedor) => fornecedor.id === id)) {
+      markRemovedId(STORAGE_KEY_REMOVED, id);
+    }
+    try {
+      const all = JSON.parse(localStorage.getItem(FAT_KEY_FORN) || '{}');
+      if (all[id]) {
+        delete all[id];
+        const json = JSON.stringify(all);
+        localStorage.setItem(FAT_KEY_FORN, json);
+        window.dispatchEvent(new StorageEvent('storage', { key: FAT_KEY_FORN, newValue: json }));
+      }
+    } catch {}
     setSelected(null);
   };
 
   const filtered = allForn.filter(f => {
     const s = search.toLowerCase();
-    return (f.nome.toLowerCase().includes(s) || f.categoria.toLowerCase().includes(s) || f.nif.includes(search)) && (categoria === 'Todas' || f.categoria === categoria);
+    return (f.nome.toLowerCase().includes(s) || f.categoria.toLowerCase().includes(s) || f.nif.includes(search))
+      && (categoria === 'Todas' || f.categoria === categoria)
+      && (tipoFiltro === 'todos' || inferFornecedorTipo(f) === tipoFiltro);
   });
 
   const totalPendente = allForn.reduce((s, f) => s + f.pendente, 0);
   const totalFaturas  = allForn.reduce((s, f) => s + f.totalFaturas, 0);
   const comPendente   = allForn.filter(f => f.pendente > 0).length;
+  const estruturaFaturasAbertas = allForn
+    .filter(f => inferFornecedorTipo(f) === 'estrutura')
+    .flatMap(f => (f.faturas || []).filter(fat => fat.estado !== 'pago' && fat.estado !== 'concluido').map(fat => ({ fornecedor: f, fatura: fat })));
+  const materiaisProcessosAbertos = processos
+    .filter(processo => {
+      const fornecedor = allForn.find(f => f.nome === processo.fornecedor || f.id === processo.fornecedorId);
+      return inferFornecedorTipo(fornecedor || {}) === 'materiais' && processo.estadoFinanceiro !== 'pago';
+    });
+  const totalPrevistoMateriais = materiaisProcessosAbertos.reduce((sum, processo) => {
+    const remanescente = Math.max(0, Number(processo.valorPrevisto || 0) - Number(processo.totalFaturado || 0));
+    return sum + remanescente;
+  }, 0);
+  const totalEstruturaAberto = estruturaFaturasAbertas.reduce((sum, entry) => sum + (Number(entry.fatura.valor) || 0), 0);
+  const faturasValidacaoMateriais = allForn
+    .filter(f => inferFornecedorTipo(f) === 'materiais')
+    .flatMap(f => (f.faturas || []).filter(fat => ['pending-dp', 'pending-lg', 'pending-ms', 'standby-lg'].includes(fat.estado)).map(fat => ({ fornecedor: f, fatura: fat })));
+  const faturasValidacaoEstrutura = allForn
+    .filter(f => inferFornecedorTipo(f) === 'estrutura')
+    .flatMap(f => (f.faturas || []).filter(fat => ['pending-lg', 'pending-ms'].includes(fat.estado)).map(fat => ({ fornecedor: f, fatura: fat })));
+  const totalFaturasPendentes = faturasValidacaoMateriais.length + faturasValidacaoEstrutura.length;
+  const faturasPendentesDetalhe = allForn.flatMap((fornecedor) =>
+    (fornecedor.faturas || [])
+      .filter((fatura) => ['pending-dp', 'pending-lg', 'pending-ms', 'standby-lg'].includes(fatura.estado))
+      .map((fatura) => ({
+        id: `${fornecedor.id}-${fatura.id}`,
+        fornecedorId: fornecedor.id,
+        faturaId: fatura.id,
+        title: fatura.nFatura || fatura.id,
+        subtitle: `${fornecedor.nome} · ${fatura.obra || '—'}`,
+        value: fmt(fatura.valor || 0),
+      }))
+  );
+  const exposicaoTotalDetalhe = [
+    ...materiaisProcessosAbertos
+      .map((processo) => {
+        const remanescente = Math.max(0, Number(processo.valorPrevisto || 0) - Number(processo.totalFaturado || 0));
+        if (remanescente <= 0) return null;
+        const fornecedor = allForn.find(f => f.nome === processo.fornecedor || f.id === processo.fornecedorId);
+        return {
+          id: `proc-${processo.id}`,
+          fornecedorId: fornecedor?.id || null,
+          encomendaId: processo.encomendaId,
+          title: processo.encomendaId,
+          subtitle: `${processo.fornecedor} · ${processo.obraId || '—'} · Materiais`,
+          value: fmt(remanescente),
+        };
+      })
+      .filter(Boolean),
+    ...estruturaFaturasAbertas.map(({ fornecedor, fatura }) => ({
+      id: `${fornecedor.id}-${fatura.id}-estrutura`,
+      fornecedorId: fornecedor.id,
+      faturaId: fatura.id,
+      title: fatura.nFatura || fatura.id,
+      subtitle: `${fornecedor.nome} · ${fatura.obra || 'Sem obra'} · Estrutura`,
+      value: fmt(fatura.valor || 0),
+    })),
+  ];
+
+  const encomendasSemFatura = processos
+    .filter((processo) => inferFornecedorTipo({ nome: processo.fornecedor, tipoFornecedor: allForn.find(f => f.nome === processo.fornecedor)?.tipoFornecedor, categoria: allForn.find(f => f.nome === processo.fornecedor)?.categoria }) === 'materiais')
+    .filter((processo) => !processo.isDraft && !processo.isJado)
+    .filter((processo) => !processo.faturaIds?.length && Number(processo.totalFaturado || 0) === 0)
+    .map((processo) => {
+      const fornecedor = allForn.find((f) => f.nome === processo.fornecedor);
+      return {
+        id: processo.id,
+        fornecedorId: fornecedor?.id || null,
+        encomendaId: processo.encomendaId,
+        title: processo.encomendaId,
+        subtitle: `${processo.fornecedor} · ${processo.obraId || '—'}`,
+        value: fmt(processo.valorPrevisto || 0),
+      };
+    });
+
+  const openEncomendaPendente = (item) => {
+    const fornecedor = allForn.find((f) => f.id === item.fornecedorId) || allForn.find((f) => f.nome === item.subtitle.split(' · ')[0]);
+    if (!fornecedor) return;
+    setSelected(fornecedor);
+    setAbrirFaturaId(null);
+    setAbrirEncomendaId(item.encomendaId);
+  };
+
+  const openFaturaDetalhe = (item) => {
+    const fornecedor = allForn.find((f) => f.id === item.fornecedorId);
+    if (!fornecedor) {
+      navigate('/fornecedores', { state: { abrirFaturaForn: { faturaId: item.faturaId, fornecedorId: item.fornecedorId } } });
+      return;
+    }
+    setSelected(fornecedor);
+    setAbrirFaturaId(item.faturaId);
+  };
 
   return (
-    <div>
+    <div style={PAGE_WIDE_STYLE}>
       {toast && <div style={{ position:'fixed', bottom:24, right:24, zIndex:600, background:'var(--color-success)', color:'#fff', padding:'10px 18px', borderRadius:8, fontSize:13, fontWeight:500, boxShadow:'0 4px 16px rgba(0,0,0,0.15)' }}>{toast}</div>}
       {showNovo && canEditFornecedores && <NovoFornecedorModal onClose={() => setShowNovo(false)} onSave={handleSave} />}
       {showNovaFatura && canEditFornecedores && (
@@ -1899,33 +2905,40 @@ export default function FornecedoresPage() {
             if (!forn) return;
             const all = JSON.parse(localStorage.getItem(FAT_KEY_FORN) || '{}');
             const faturas = all[fornId] || forn.faturas || [];
+            const flow = getFornecedorFlowMeta(forn);
             const nova = {
               id: fatData.nFatura || `F-${Date.now()}`,
               nFatura: fatData.nFatura || '',
+              encomendaId: fatData.encomendaId || null,
               obra: fatData.obra, valor: fatData.valor,
               data: new Date(fatData.data).toLocaleDateString('pt-PT'),
               venc: fatData.venc ? new Date(fatData.venc).toLocaleDateString('pt-PT') : '',
               condPag: fatData.condPag, descricao: fatData.descricao,
-              estado: 'pending-dp', validDP: 'Pendente',
+              estado: flow.initialEstado, validDP: flow.initialValidDP,
               dataPrevisaoPagamento: fatData.dataPrevisaoPagamento || null,
               fluxoVal: 'pendente_dp', pdf: fatData.pdf,
             };
             all[fornId] = [...faturas, nova];
             localStorage.setItem(FAT_KEY_FORN, JSON.stringify(all));
+            if (fatData.encomendaId) {
+              const processo = loadProcessosEncomenda().find(item => item.encomendaId === fatData.encomendaId);
+              if (processo) updateProcessoEncomenda(processo.id, { estadoWorkflow: 'fatura_recebida' });
+            }
             // Notif SIS → DP
-            addNotif({ tipo: 'confirmar_emissao', icon: '📋', titulo: `Nova fatura — aguarda validação`,
-              sub: `${forn.nome} · ${nova.id} · ${nova.obra}`, path: '/fornecedores',
-              destinatario: 'dp', meta: { faturaId: nova.id, fornecedorNome: forn.nome } });
+            addNotif({ tipo: 'confirmar_emissao', icon: flow.requiresDP ? '📋' : '💶', titulo: flow.requiresDP ? 'Nova fatura — aguarda validação' : 'Nova fatura — aguarda aprovação financeira',
+              sub: `${forn.nome} · ${nova.id} · ${nova.obra || 'Sem obra'}`, path: '/fornecedores',
+              destinatario: flow.requiresDP ? 'dp' : 'lg', meta: { faturaId: nova.id, fornecedorNome: forn.nome } });
             setShowNovaFatura(false);
             setSelected(forn);
           }}
         />
       )}
-      {selected && <FornecedorModal f={selected} abrirFaturaId={abrirFaturaId} onClose={() => { setSelected(null); setAbrirFaturaId(null); }} onDelete={handleDelete} />}
+      {selected && <FornecedorModal f={selected} abrirFaturaId={abrirFaturaId} abrirEncomendaId={abrirEncomendaId} onClose={() => { setSelected(null); setAbrirFaturaId(null); setAbrirEncomendaId(null); }} onDelete={handleDelete} />}
 
       <div className="page-header">
         <div><div className="page-title">Fornecedores</div><div className="page-subtitle">{allForn.length} fornecedores · Gestão de faturas e pagamentos</div></div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button className="btn" onClick={() => navigate('/pagamentos')}>↗ Pagamentos</button>
           <div style={{ display: 'flex', background: 'var(--bg-app)', borderRadius: 8, border: '0.5px solid var(--border)', overflow: 'hidden' }}>
             <button onClick={() => setVistaForn('galeria')} style={{ padding: '6px 10px', border: 'none', cursor: 'pointer', fontSize: 14, background: vistaForn === 'galeria' ? 'var(--brand-primary)' : 'transparent', color: vistaForn === 'galeria' ? '#fff' : 'var(--text-muted)' }} title="Vista galeria">⊞</button>
             <button onClick={() => setVistaForn('tabela')} style={{ padding: '6px 10px', border: 'none', cursor: 'pointer', fontSize: 14, background: vistaForn === 'tabela' ? 'var(--brand-primary)' : 'transparent', color: vistaForn === 'tabela' ? '#fff' : 'var(--text-muted)' }} title="Vista tabela">☰</button>
@@ -1935,16 +2948,55 @@ export default function FornecedoresPage() {
         </div>
       </div>
 
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(4, minmax(0,1fr))', gap:12, marginBottom:20 }}>
-        <div className="kpi-card"><div className="kpi-label">Total fornecedores</div><div className="kpi-value">{allForn.length}</div><div className="kpi-delta up">{comPendente} com pendentes</div></div>
-        <div className="kpi-card"><div className="kpi-label">Total em aberto</div><div className="kpi-value" style={{ color:'var(--color-warning)' }}>{fmt(totalPendente)}</div><div className="kpi-delta dn">Aguarda pagamento</div></div>
-        <div className="kpi-card"><div className="kpi-label">Faturas registadas</div><div className="kpi-value">{totalFaturas}</div><div className="kpi-delta up">Todas as obras</div></div>
-        <div className="kpi-card"><div className="kpi-label">Pendentes valid. DP</div><div className="kpi-value" style={{ color:'var(--color-danger)' }}>1</div><div className="kpi-delta dn">Construções RJ · +5 dias</div></div>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(3, minmax(0,1fr))', gap:12, marginBottom:20 }}>
+        <div className="kpi-card">
+          <div className="kpi-label" style={{ display:'flex', alignItems:'center' }}>
+            Exposição a pagar
+            <InfoPopoverButton
+              title="Previstos e custos em aberto"
+              items={exposicaoTotalDetalhe}
+              onOpenItem={(item) => item.encomendaId ? openEncomendaPendente(item) : openFaturaDetalhe(item)}
+            />
+          </div>
+          <div className="kpi-value">{fmt(totalPrevistoMateriais + totalEstruturaAberto)}</div>
+          <div className="kpi-delta dn">Materiais {fmt(totalPrevistoMateriais)} · Estrutura {fmt(totalEstruturaAberto)}</div>
+        </div>
+        <div className="kpi-card">
+          <div className="kpi-label" style={{ display:'flex', alignItems:'center' }}>
+            Faturas à espera de validação
+            <InfoPopoverButton
+              title="Faturas à espera de validação"
+              items={faturasPendentesDetalhe}
+              onOpenItem={openFaturaDetalhe}
+            />
+          </div>
+          <div className="kpi-value">{totalFaturasPendentes}</div>
+          <div className="kpi-delta dn">Materiais {faturasValidacaoMateriais.length} · Estrutura {faturasValidacaoEstrutura.length}</div>
+        </div>
+        <div className="kpi-card">
+          <div className="kpi-label" style={{ display:'flex', alignItems:'center' }}>
+            Encomendas sem fatura
+            <InfoPopoverButton
+              title="Encomendas à espera de fatura"
+              items={encomendasSemFatura}
+              onOpenItem={openEncomendaPendente}
+            />
+          </div>
+          <div className="kpi-value">{encomendasSemFatura.length}</div>
+          <div className="kpi-delta dn">Emitidas e ainda sem fatura associada</div>
+        </div>
       </div>
 
       <div style={{ display:'flex', gap:10, marginBottom:16, flexWrap:'wrap', alignItems:'center' }}>
         <input className="sis-input" placeholder="Pesquisar por nome, categoria ou NIF..." value={search} onChange={e => setSearch(e.target.value)} style={{ width:300 }} />
         <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+          {[
+            { key: 'todos', label: 'Todos' },
+            { key: 'materiais', label: 'Materiais / Obras' },
+            { key: 'estrutura', label: 'Estrutura / Logística' },
+          ].map(tipo => (
+            <button key={tipo.key} onClick={() => setTipoFiltro(tipo.key)} style={{ fontFamily:'var(--font-body)', fontSize:12, padding:'5px 12px', borderRadius:20, border:'0.5px solid', borderColor: tipoFiltro === tipo.key ? 'var(--brand-primary)' : 'var(--border)', background: tipoFiltro === tipo.key ? 'var(--brand-primary)' : 'var(--bg-card)', color: tipoFiltro === tipo.key ? '#fff' : 'var(--text-secondary)', cursor:'pointer', transition:'all .15s', whiteSpace:'nowrap' }}>{tipo.label}</button>
+          ))}
           {CATEGORIAS.map(c => (
             <button key={c} onClick={() => setCategoria(c)} style={{ fontFamily:'var(--font-body)', fontSize:12, padding:'5px 12px', borderRadius:20, border:'0.5px solid', borderColor: categoria === c ? 'var(--brand-primary)' : 'var(--border)', background: categoria === c ? 'var(--brand-primary)' : 'var(--bg-card)', color: categoria === c ? '#fff' : 'var(--text-secondary)', cursor:'pointer', transition:'all .15s', whiteSpace:'nowrap' }}>{c}</button>
           ))}
@@ -1965,11 +3017,11 @@ export default function FornecedoresPage() {
                 onMouseLeave={e => { e.currentTarget.style.borderColor=''; e.currentTarget.style.boxShadow=''; }}>
                 <div style={{ display:'flex', alignItems:'flex-start', gap:10, marginBottom:10 }}>
                   <div style={{ width:40, height:40, borderRadius:10, background:'var(--bg-app)', border:'0.5px solid var(--border)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:15, fontWeight:700, color:'var(--brand-primary)', flexShrink:0 }}>{f.nome.charAt(0)}</div>
-                  <div style={{ flex:1, minWidth:0 }}><div style={{ fontWeight:600, fontSize:14 }}>{f.nome}</div><div style={{ fontSize:12, color:'var(--text-muted)' }}>{f.categoria}</div></div>
+                  <div style={{ flex:1, minWidth:0 }}><div style={{ fontWeight:600, fontSize:14 }}>{f.nome}</div><div style={{ fontSize:12, color:'var(--text-muted)', display:'flex', gap:6, alignItems:'center', flexWrap:'wrap' }}><span>{f.categoria}</span><span>{f.classificacaoMercado || 'Nacional'}</span><FornecedorTipoBadge tipo={inferFornecedorTipo(f)} /></div></div>
                   <span className={`badge ${est.cls}`} style={{ flexShrink:0 }}>{est.label}</span>
                 </div>
                 <div style={{ display:'flex', gap:12, fontSize:12, color:'var(--text-muted)', marginBottom:10, flexWrap:'wrap' }}>
-                  <span>NIF {f.nif}</span><span>·</span><span>{f.obras.length} obra{f.obras.length !== 1 ? 's' : ''}</span><span>·</span><span>{f.totalFaturas} faturas</span>
+                  <span>NIF {f.nif}</span><span>·</span><span>{inferFornecedorTipo(f) === 'materiais' ? `${f.obras.length} obra${f.obras.length !== 1 ? 's' : ''}` : 'Estrutura'}</span><span>·</span><span>{f.totalFaturas} faturas</span>
                 </div>
                 {f.obras.length > 0 && <div style={{ display:'flex', gap:4, marginBottom:10, flexWrap:'wrap' }}>{f.obras.map(o => <span key={o} className="badge badge-n">{o}</span>)}</div>}
                 <div style={{ height:'0.5px', background:'var(--border)', margin:'10px 0' }} />
@@ -2006,7 +3058,13 @@ export default function FornecedoresPage() {
                         {f.nome}
                       </div>
                     </td>
-                    <td style={{ padding:'10px 14px', color:'var(--text-muted)' }}>{f.categoria}</td>
+                    <td style={{ padding:'10px 14px', color:'var(--text-muted)' }}>
+                      <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+                        <span>{f.categoria}</span>
+                        <span style={{ fontSize:12 }}>{f.classificacaoMercado || 'Nacional'}</span>
+                        <FornecedorTipoBadge tipo={inferFornecedorTipo(f)} />
+                      </div>
+                    </td>
                     <td style={{ padding:'10px 14px', color:'var(--text-muted)', fontFamily:'var(--font-mono)', fontSize:12 }}>{f.nif}</td>
                     <td style={{ padding:'10px 14px' }}>{f.obras.map(o => <span key={o} className="badge badge-n" style={{ marginRight:4 }}>{o}</span>)}</td>
                     <td style={{ padding:'10px 14px', textAlign:'center' }}>{f.totalFaturas}</td>

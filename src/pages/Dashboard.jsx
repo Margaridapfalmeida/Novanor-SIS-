@@ -462,7 +462,7 @@ export default function Dashboard() {
               <div style={{ fontWeight: 600, fontSize: 14 }}>Próximos pagamentos a fornecedores</div>
               <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>Esta semana · Aguardam autorização ou execução</div>
             </div>
-            <button onClick={() => navigate('/fornecedores')} style={{ fontFamily: 'var(--font-body)', fontSize: 12, color: 'var(--brand-primary)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Ver mapa →</button>
+            <button onClick={() => navigate('/pagamentos')} style={{ fontFamily: 'var(--font-body)', fontSize: 12, color: 'var(--brand-primary)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Abrir centro →</button>
           </div>
           <table className="sis-table">
             <thead>
@@ -472,7 +472,7 @@ export default function Dashboard() {
               {pagamentos.length === 0 ? (
                 <tr><td colSpan={7} style={{ textAlign: 'center', padding: '24px', color: 'var(--text-muted)', fontSize: 13 }}>✓ Sem pagamentos pendentes</td></tr>
               ) : pagamentos.map((p, i) => (
-                <tr key={i} onClick={() => navigate('/fornecedores', { state: { abrirFaturaForn: { faturaId: p.faturaId, fornecedorId: p.fornId } } })} style={{ cursor: 'pointer' }}>
+                <tr key={i} onClick={() => navigate('/pagamentos', { state: { abrirPagamentoForn: { faturaId: p.faturaId, fornecedorId: p.fornId } } })} style={{ cursor: 'pointer' }}>
                   <td style={{ fontWeight: 500 }}>{p.forn}</td>
                   <td><span className="badge badge-neutral">{p.obra}</span></td>
                   <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-secondary)' }}>{p.fatura}</td>
@@ -484,8 +484,8 @@ export default function Dashboard() {
                     </span>
                   </td>
                   <td>
-                    {p.estado === 'pending-ms' && <button className="btn btn-sm btn-primary" onClick={e => { e.stopPropagation(); navigate('/fornecedores'); }}>Autorizar</button>}
-                    {p.estado === 'autorizado' && <button className="btn btn-sm" style={{ color: 'var(--color-success)', borderColor: 'var(--color-success)' }} onClick={e => { e.stopPropagation(); navigate('/fornecedores'); }}>Pagar</button>}
+                    {p.estado === 'pending-ms' && <button className="btn btn-sm btn-primary" onClick={e => { e.stopPropagation(); navigate('/pagamentos', { state: { abrirPagamentoForn: { faturaId: p.faturaId, fornecedorId: p.fornId } } }); }}>Autorizar</button>}
+                    {p.estado === 'autorizado' && <button className="btn btn-sm" style={{ color: 'var(--color-success)', borderColor: 'var(--color-success)' }} onClick={e => { e.stopPropagation(); navigate('/pagamentos', { state: { abrirPagamentoForn: { faturaId: p.faturaId, fornecedorId: p.fornId } } }); }}>Pagar</button>}
                     {(p.estado === 'pending-dp' || p.estado === 'pending-lg') && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Aguarda validação</span>}
                   </td>
                 </tr>

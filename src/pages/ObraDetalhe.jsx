@@ -7,6 +7,7 @@ import { FORNECEDORES_DATA } from './Fornecedores';
 import { CLIENTES_DATA } from './Clientes';
 import EntityAccessEditorModal from '../components/access/EntityAccessEditorModal.jsx';
 import { canAccessObra, canEditEntitySection, canEditModule, canEditObra, canViewEntitySection } from '../context/PermissionsConfig';
+import { syncProcessosEncomendaFromObra } from '../utils/encomendaWorkflow';
 
 const fmt  = v => '€ ' + Number(v).toLocaleString('pt-PT');
 const fmtK = v => { const n = Math.abs(v); return (n >= 1000000 ? (v/1000000).toFixed(1)+'M' : n >= 1000 ? (v/1000).toFixed(0)+'k' : v) + ' €'; };
@@ -63,7 +64,9 @@ function loadObrasExtra() {
 function saveObraLS(id, campos) {
   const all = loadObrasLS();
   all[id] = { ...(all[id] || {}), ...campos };
-  localStorage.setItem(LS_KEY, JSON.stringify(all));
+  const json = JSON.stringify(all);
+  localStorage.setItem(LS_KEY, json);
+  window.dispatchEvent(new StorageEvent('storage', { key: LS_KEY, newValue: json }));
 }
 function getObraData(id) {
   const base = [...OBRAS_DATA, ...loadObrasExtra()].find(o => o.id === id);
@@ -74,6 +77,7 @@ function getObraData(id) {
     jados:      extra.jados      || base.jados      || [],
     alertas:    extra.alertas    || base.alertas    || [],
     encomendas: extra.encomendas || base.encomendas || [],
+    planoFaturacao: extra.planoFaturacao || base.planoFaturacao || [],
     thresholds: extra.thresholds || { atencao: 1, alerta: 2, critico: 2, dataLimite: '' },
   };
 }
@@ -780,10 +784,11 @@ function FichaObraModal({ obra, loadEnc, saveEnc, updateObra, fornecedores, pode
         jados: [...(obra.jados || []), jado],
       });
       if (addNotif) addNotif({
-        tipo: 'info', icon: '📋',
+        tipo: 'alerta', alerta: true, icon: '📋',
         titulo: `JADO automático emitido — ${obra.id}`,
         sub: `${jado.num} · Validação: ${jado.validadorNome} · Encomenda ${nova.id} em stand-by`,
         path: `/obras/${obra.id}`, destinatario: getJadoValidatorTarget(jado.validador),
+        meta: { obraId: obra.id, jadoNum: jado.num, alertKind: 'jado_validacao' },
       });
       setShowDraftModal(false);
       setDraftSeedItems(null);
@@ -880,10 +885,11 @@ function FichaObraModal({ obra, loadEnc, saveEnc, updateObra, fornecedores, pode
         jados: [...(obra.jados || []), jado],
       });
       if (addNotif) addNotif({
-        tipo: 'info', icon: '📋',
+        tipo: 'alerta', alerta: true, icon: '📋',
         titulo: `JADO automático emitido — ${obra.id}`,
         sub: `${jado.num} · Validação: ${jado.validadorNome} · Encomenda ${blockedOrder.id} em stand-by`,
         path: `/obras/${obra.id}`, destinatario: getJadoValidatorTarget(jado.validador),
+        meta: { obraId: obra.id, jadoNum: jado.num, alertKind: 'jado_validacao' },
       });
       setEditingDraftFromFicha(null);
       setDraftSeedItems(null);
@@ -1152,6 +1158,30 @@ function EncomendasTab({ obra, loadEnc, saveEnc, updateObra, fornecedores, force
       encomendas: flattenEncomendaItemsForObra(list),
       ...(extraObraFields || {}),
     });
+  };
+
+  const apagarEncomenda = (enc) => {
+    if (!window.confirm(`Apagar a encomenda ${enc.id}?`)) return;
+    const updatedOrders = encomendas.filter((item) => item.id !== enc.id);
+    persist(updatedOrders, {
+      jados: (obra.jados || []).filter((jado) => jado.num !== enc.jadoId),
+    });
+    try {
+      const raw = JSON.parse(localStorage.getItem('sis_faturas_forn') || '{}');
+      let changed = false;
+      Object.keys(raw).forEach((fornId) => {
+        const filtered = (raw[fornId] || []).filter((fatura) => fatura.encomendaId !== enc.id);
+        if (filtered.length !== (raw[fornId] || []).length) {
+          raw[fornId] = filtered;
+          changed = true;
+        }
+      });
+      if (changed) {
+        const json = JSON.stringify(raw);
+        localStorage.setItem('sis_faturas_forn', json);
+        window.dispatchEvent(new StorageEvent('storage', { key: 'sis_faturas_forn', newValue: json }));
+      }
+    } catch {}
   };
 
   useEffect(() => {
@@ -1477,6 +1507,9 @@ function EncomendasTab({ obra, loadEnc, saveEnc, updateObra, fornecedores, force
                         >
                           {e.estado === 'parcial' ? '✓ Concluir' : '✓ Satisfazer'}
                         </button>
+                      )}
+                      {podeGerir && (
+                        <button className="btn btn-sm" style={{ color:'var(--color-danger)', borderColor:'var(--color-danger)' }} title="Apagar encomenda" onClick={() => apagarEncomenda(e)}>Apagar</button>
                       )}
                     </div>
                   </td>
@@ -2230,7 +2263,29 @@ export default function ObraDetalhe() {
 
   const ENC_KEY = `sis_encomendas_${obra.id}`;
   const loadEnc = () => { try { return JSON.parse(localStorage.getItem(ENC_KEY) || '[]'); } catch { return []; } };
-  const saveEnc = (list) => { localStorage.setItem(ENC_KEY, JSON.stringify(list)); };
+  const saveEnc = (list) => {
+    localStorage.setItem(ENC_KEY, JSON.stringify(list));
+    syncProcessosEncomendaFromObra({ obra, encomendas: list });
+  };
+  const removeJado = (jadoNum) => {
+    if (!window.confirm(`Apagar ${jadoNum}?`)) return;
+    const encomendasAtualizadas = loadEnc().map((enc) => (
+      enc.jadoId === jadoNum
+        ? {
+            ...enc,
+            jadoId: null,
+            jadoValidatorNome: '',
+            motivoStandby: '',
+            estado: enc.estado === 'standby-jado' ? 'draft' : enc.estado,
+          }
+        : enc
+    ));
+    saveEnc(encomendasAtualizadas);
+    updateObra({
+      jados: (obra.jados || []).filter((j) => j.num !== jadoNum),
+      encomendas: flattenEncomendaItemsForObra(encomendasAtualizadas),
+    });
+  };
   const libertarEncomendasStandby = (jado) => {
     const existentes = loadEnc();
     const alvo = existentes.filter(enc => enc.estado === 'standby-jado' && enc.jadoId === jado.num);
@@ -2258,11 +2313,24 @@ export default function ObraDetalhe() {
     });
   };
 
+  useEffect(() => {
+    syncProcessosEncomendaFromObra({ obra, encomendas: loadEnc() });
+  }, [obra.id]);
+
   // Adicionar JADO
   const addJado = (novoJado) => {
     const jados = [...(obra.jados || []), novoJado];
     updateObra({ jados });
-    addNotif({ tipo: 'info', icon: '📋', titulo: `${novoJado.num} emitido — ${obra.id}`, sub: `${novoJado.fase} · Desvio ${novoJado.desvio}% · Valida: ${novoJado.validadorNome || 'Miguel'}`, path: `/obras/${id}`, destinatario: getJadoValidatorTarget(novoJado.validador) });
+    addNotif({
+      tipo: 'alerta',
+      alerta: true,
+      icon: '📋',
+      titulo: `${novoJado.num} emitido — ${obra.id}`,
+      sub: `${novoJado.fase} · Desvio ${novoJado.desvio}% · Valida: ${novoJado.validadorNome || 'Miguel'}`,
+      path: `/obras/${id}`,
+      destinatario: getJadoValidatorTarget(novoJado.validador),
+      meta: { obraId: obra.id, jadoNum: novoJado.num, alertKind: 'jado_validacao' },
+    });
   };
 
   // Avançar JADO
@@ -2761,6 +2829,9 @@ export default function ObraDetalhe() {
                       )}
                       {canAct && j.estado !== 'aguarda-dp' && j.estado !== 'env-comercial' && (
                         <button className="btn btn-sm" style={{ fontSize: 10 }} onClick={() => avancarJado(i)}>Avançar →</button>
+                      )}
+                      {(isCG || isMS) && (
+                        <button className="btn btn-sm" style={{ fontSize: 10, color:'var(--color-danger)', borderColor:'var(--color-danger)' }} onClick={() => removeJado(j.num)}>Apagar</button>
                       )}
                     </div>
                   </div>

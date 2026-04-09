@@ -49,6 +49,13 @@ export default function LogisticaPage() {
   const [tab, setTab] = useState('frota');
   const [docsModal, setDocsModal] = useState(null); // {scope,id,title}
   const [docForm, setDocForm] = useState(null); // {scope,id,title,titulo,descricao,file}
+  const [search, setSearch] = useState('');
+  const [frotaEstadoFiltro, setFrotaEstadoFiltro] = useState('todos');
+  const [frotaTipoFiltro, setFrotaTipoFiltro] = useState('todos');
+  const [imovelEstadoFiltro, setImovelEstadoFiltro] = useState('todos');
+  const [imovelTipoFiltro, setImovelTipoFiltro] = useState('todos');
+  const [contratoEstadoFiltro, setContratoEstadoFiltro] = useState('todos');
+  const [contratoServicoFiltro, setContratoServicoFiltro] = useState('todos');
 
   const [frota, setFrota] = useState(() => load(LS_FROTA, FROTA_DEFAULT));
   const [showFrota, setShowFrota] = useState(false);
@@ -154,6 +161,70 @@ export default function LogisticaPage() {
     [contratos],
   );
 
+  const matchDocsText = (docs = [], query) => {
+    if (!query) return true;
+    return (docs || []).some(doc =>
+      `${doc?.name || ''} ${doc?.titulo || ''} ${doc?.descricao || ''}`.toLowerCase().includes(query)
+    );
+  };
+
+  const searchQuery = search.trim().toLowerCase();
+
+  const frotaFiltrada = useMemo(() => (
+    frota.filter(v => {
+      const matchesSearch = !searchQuery || [
+        v.matricula,
+        v.marcaModelo,
+        v.tipo,
+        v.estado,
+        v.colaborador,
+        v.proximaInspecao,
+        v.seguroAte,
+      ].join(' ').toLowerCase().includes(searchQuery) || matchDocsText(v.docs, searchQuery);
+      const matchesEstado = frotaEstadoFiltro === 'todos' || v.estado === frotaEstadoFiltro;
+      const matchesTipo = frotaTipoFiltro === 'todos' || v.tipo === frotaTipoFiltro;
+      return matchesSearch && matchesEstado && matchesTipo;
+    })
+  ), [frota, searchQuery, frotaEstadoFiltro, frotaTipoFiltro]);
+
+  const imoveisFiltrados = useMemo(() => (
+    imoveis.filter(i => {
+      const matchesSearch = !searchQuery || [
+        i.nome,
+        i.tipo,
+        i.morada,
+        i.estado,
+        i.responsavel,
+        i.area,
+        i.rendaMensal,
+      ].join(' ').toLowerCase().includes(searchQuery) || matchDocsText(i.docs, searchQuery);
+      const matchesEstado = imovelEstadoFiltro === 'todos' || i.estado === imovelEstadoFiltro;
+      const matchesTipo = imovelTipoFiltro === 'todos' || i.tipo === imovelTipoFiltro;
+      return matchesSearch && matchesEstado && matchesTipo;
+    })
+  ), [imoveis, searchQuery, imovelEstadoFiltro, imovelTipoFiltro]);
+
+  const contratosFiltrados = useMemo(() => (
+    contratos.filter(c => {
+      const matchesSearch = !searchQuery || [
+        c.imovel,
+        c.servico,
+        c.fornecedor,
+        c.numeroContrato,
+        c.vencimento,
+        c.estado,
+        c.custoMensal,
+      ].join(' ').toLowerCase().includes(searchQuery) || matchDocsText(c.docs, searchQuery);
+      const matchesEstado = contratoEstadoFiltro === 'todos' || c.estado === contratoEstadoFiltro;
+      const matchesServico = contratoServicoFiltro === 'todos' || c.servico === contratoServicoFiltro;
+      return matchesSearch && matchesEstado && matchesServico;
+    })
+  ), [contratos, searchQuery, contratoEstadoFiltro, contratoServicoFiltro]);
+
+  const frotaTipos = [...new Set(frota.map(v => v.tipo).filter(Boolean))];
+  const imovelTipos = [...new Set(imoveis.map(i => i.tipo).filter(Boolean))];
+  const contratoServicos = [...new Set(contratos.map(c => c.servico).filter(Boolean))];
+
   return (
     <div>
       {docForm && (
@@ -257,13 +328,63 @@ export default function LogisticaPage() {
         ))}
       </div>
 
+      <div className="card" style={{ marginBottom: 16, padding: '14px 16px' }}>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Pesquisar informação e documentos guardados..."
+            style={{ ...IS, flex: '1 1 280px', background: 'var(--bg-app)' }}
+          />
+
+          {tab === 'frota' && (
+            <>
+              <select value={frotaEstadoFiltro} onChange={e => setFrotaEstadoFiltro(e.target.value)} style={{ ...IS, width: 180 }}>
+                <option value="todos">Todos os estados</option>
+                {['ativo', 'manutencao', 'indisponivel'].map(v => <option key={v} value={v}>{v}</option>)}
+              </select>
+              <select value={frotaTipoFiltro} onChange={e => setFrotaTipoFiltro(e.target.value)} style={{ ...IS, width: 180 }}>
+                <option value="todos">Todos os tipos</option>
+                {frotaTipos.map(v => <option key={v} value={v}>{v}</option>)}
+              </select>
+            </>
+          )}
+
+          {tab === 'imoveis' && (
+            <>
+              <select value={imovelEstadoFiltro} onChange={e => setImovelEstadoFiltro(e.target.value)} style={{ ...IS, width: 180 }}>
+                <option value="todos">Todos os estados</option>
+                {['operacional', 'arrendado', 'em-obras', 'vago'].map(v => <option key={v} value={v}>{v}</option>)}
+              </select>
+              <select value={imovelTipoFiltro} onChange={e => setImovelTipoFiltro(e.target.value)} style={{ ...IS, width: 180 }}>
+                <option value="todos">Todos os tipos</option>
+                {imovelTipos.map(v => <option key={v} value={v}>{v}</option>)}
+              </select>
+            </>
+          )}
+
+          {tab === 'contratos' && (
+            <>
+              <select value={contratoEstadoFiltro} onChange={e => setContratoEstadoFiltro(e.target.value)} style={{ ...IS, width: 180 }}>
+                <option value="todos">Todos os estados</option>
+                {['ativo', 'pendente', 'terminado'].map(v => <option key={v} value={v}>{v}</option>)}
+              </select>
+              <select value={contratoServicoFiltro} onChange={e => setContratoServicoFiltro(e.target.value)} style={{ ...IS, width: 180 }}>
+                <option value="todos">Todos os serviços</option>
+                {contratoServicos.map(v => <option key={v} value={v}>{v}</option>)}
+              </select>
+            </>
+          )}
+        </div>
+      </div>
+
       {tab === 'frota' && (
         <div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 16 }}>
-            <div className="kpi-card"><div className="kpi-label">Viaturas</div><div className="kpi-value">{frota.length}</div></div>
-            <div className="kpi-card"><div className="kpi-label">Ativas</div><div className="kpi-value" style={{ color: 'var(--color-success)' }}>{frota.filter(v => v.estado === 'ativo').length}</div></div>
-            <div className="kpi-card"><div className="kpi-label">Em manutenção</div><div className="kpi-value" style={{ color: 'var(--color-warning)' }}>{frota.filter(v => v.estado === 'manutencao').length}</div></div>
-            <div className="kpi-card"><div className="kpi-label">KM Totais</div><div className="kpi-value">{frota.reduce((s, v) => s + Number(v.km || 0), 0).toLocaleString('pt-PT')}</div></div>
+            <div className="kpi-card"><div className="kpi-label">Viaturas</div><div className="kpi-value">{frotaFiltrada.length}</div></div>
+            <div className="kpi-card"><div className="kpi-label">Ativas</div><div className="kpi-value" style={{ color: 'var(--color-success)' }}>{frotaFiltrada.filter(v => v.estado === 'ativo').length}</div></div>
+            <div className="kpi-card"><div className="kpi-label">Em manutenção</div><div className="kpi-value" style={{ color: 'var(--color-warning)' }}>{frotaFiltrada.filter(v => v.estado === 'manutencao').length}</div></div>
+            <div className="kpi-card"><div className="kpi-label">KM Totais</div><div className="kpi-value">{frotaFiltrada.reduce((s, v) => s + Number(v.km || 0), 0).toLocaleString('pt-PT')}</div></div>
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
@@ -305,7 +426,7 @@ export default function LogisticaPage() {
             <table className="sis-table">
               <thead><tr><th>Matrícula</th><th>Viatura</th><th>Tipo</th><th>KM</th><th>Inspeção</th><th>Seguro</th><th>Responsável</th><th>Estado</th><th>Docs</th><th>Ações</th></tr></thead>
               <tbody>
-                {frota.map(v => (
+                {frotaFiltrada.map(v => (
                   <tr key={v.id}>
                     <td style={{ fontFamily: 'var(--font-mono)' }}>{v.matricula}</td>
                     <td style={{ fontWeight: 600 }}>{v.marcaModelo}</td>
@@ -325,6 +446,9 @@ export default function LogisticaPage() {
                     </td>
                   </tr>
                 ))}
+                {frotaFiltrada.length === 0 && (
+                  <tr><td colSpan={10} style={{ padding: '18px 12px', color: 'var(--text-muted)', textAlign: 'center' }}>Sem resultados para os filtros actuais.</td></tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -334,10 +458,10 @@ export default function LogisticaPage() {
       {tab === 'imoveis' && (
         <div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 16 }}>
-            <div className="kpi-card"><div className="kpi-label">Imóveis</div><div className="kpi-value">{imoveis.length}</div></div>
-            <div className="kpi-card"><div className="kpi-label">Operacionais</div><div className="kpi-value" style={{ color: 'var(--color-success)' }}>{imoveis.filter(i => i.estado === 'operacional').length}</div></div>
-            <div className="kpi-card"><div className="kpi-label">Área total (m²)</div><div className="kpi-value">{imoveis.reduce((s, i) => s + Number(i.area || 0), 0)}</div></div>
-            <div className="kpi-card"><div className="kpi-label">Renda mensal</div><div className="kpi-value">{fmt(imoveis.reduce((s, i) => s + Number(i.rendaMensal || 0), 0))}</div></div>
+            <div className="kpi-card"><div className="kpi-label">Imóveis</div><div className="kpi-value">{imoveisFiltrados.length}</div></div>
+            <div className="kpi-card"><div className="kpi-label">Operacionais</div><div className="kpi-value" style={{ color: 'var(--color-success)' }}>{imoveisFiltrados.filter(i => i.estado === 'operacional').length}</div></div>
+            <div className="kpi-card"><div className="kpi-label">Área total (m²)</div><div className="kpi-value">{imoveisFiltrados.reduce((s, i) => s + Number(i.area || 0), 0)}</div></div>
+            <div className="kpi-card"><div className="kpi-label">Renda mensal</div><div className="kpi-value">{fmt(imoveisFiltrados.reduce((s, i) => s + Number(i.rendaMensal || 0), 0))}</div></div>
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
@@ -378,7 +502,7 @@ export default function LogisticaPage() {
             <table className="sis-table">
               <thead><tr><th>Imóvel</th><th>Tipo</th><th>Morada</th><th>Área</th><th>Renda</th><th>Responsável</th><th>Estado</th><th>Docs</th><th>Ações</th></tr></thead>
               <tbody>
-                {imoveis.map(i => (
+                {imoveisFiltrados.map(i => (
                   <tr key={i.id}>
                     <td style={{ fontWeight: 600 }}>{i.nome}</td>
                     <td>{i.tipo}</td>
@@ -397,6 +521,9 @@ export default function LogisticaPage() {
                     </td>
                   </tr>
                 ))}
+                {imoveisFiltrados.length === 0 && (
+                  <tr><td colSpan={9} style={{ padding: '18px 12px', color: 'var(--text-muted)', textAlign: 'center' }}>Sem resultados para os filtros actuais.</td></tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -406,10 +533,10 @@ export default function LogisticaPage() {
       {tab === 'contratos' && (
         <div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 16 }}>
-            <div className="kpi-card"><div className="kpi-label">Contratos</div><div className="kpi-value">{contratos.length}</div></div>
-            <div className="kpi-card"><div className="kpi-label">Ativos</div><div className="kpi-value" style={{ color: 'var(--color-success)' }}>{contratos.filter(c => c.estado === 'ativo').length}</div></div>
-            <div className="kpi-card"><div className="kpi-label">Pendentes</div><div className="kpi-value" style={{ color: 'var(--color-warning)' }}>{contratos.filter(c => c.estado === 'pendente').length}</div></div>
-            <div className="kpi-card"><div className="kpi-label">Custo mensal</div><div className="kpi-value">{fmt(contratos.reduce((s, c) => s + Number(c.custoMensal || 0), 0))}</div></div>
+            <div className="kpi-card"><div className="kpi-label">Contratos</div><div className="kpi-value">{contratosFiltrados.length}</div></div>
+            <div className="kpi-card"><div className="kpi-label">Ativos</div><div className="kpi-value" style={{ color: 'var(--color-success)' }}>{contratosFiltrados.filter(c => c.estado === 'ativo').length}</div></div>
+            <div className="kpi-card"><div className="kpi-label">Pendentes</div><div className="kpi-value" style={{ color: 'var(--color-warning)' }}>{contratosFiltrados.filter(c => c.estado === 'pendente').length}</div></div>
+            <div className="kpi-card"><div className="kpi-label">Custo mensal</div><div className="kpi-value">{fmt(contratosFiltrados.reduce((s, c) => s + Number(c.custoMensal || 0), 0))}</div></div>
           </div>
 
           <div className="card" style={{ marginBottom: 12 }}>
@@ -459,7 +586,7 @@ export default function LogisticaPage() {
             <table className="sis-table">
               <thead><tr><th>Imóvel</th><th>Serviço</th><th>Fornecedor</th><th>Nº Contrato</th><th>Custo</th><th>Vencimento</th><th>Estado</th><th>Docs</th><th>Ações</th></tr></thead>
               <tbody>
-                {contratos.map(c => (
+                {contratosFiltrados.map(c => (
                   <tr key={c.id}>
                     <td style={{ fontWeight: 600 }}>{c.imovel}</td>
                     <td>{c.servico}</td>
@@ -478,6 +605,9 @@ export default function LogisticaPage() {
                     </td>
                   </tr>
                 ))}
+                {contratosFiltrados.length === 0 && (
+                  <tr><td colSpan={9} style={{ padding: '18px 12px', color: 'var(--text-muted)', textAlign: 'center' }}>Sem resultados para os filtros actuais.</td></tr>
+                )}
               </tbody>
             </table>
           </div>

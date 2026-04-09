@@ -63,6 +63,7 @@ function loadExtras() {
 function saveExtras(list) { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); }
 
 const FAT_KEY = 'sis_faturas_cli';
+const PAGE_WIDE_STYLE = { width: 'calc(100%)', marginLeft: -12, marginRight: -12, maxWidth: 'none' };
 function loadFaturas(clienteId, defaultFaturas) {
   try {
     const all = JSON.parse(localStorage.getItem(FAT_KEY) || '{}');
@@ -80,6 +81,7 @@ function saveFaturas(clienteId, faturas) {
 export const CLIENTES_DATA = withDemoSeed([
   {
     id: 'c001', nome: 'Logicor Portugal SA', nif: '508 999 001',
+    classificacaoMercado: 'Nacional',
     categoria: 'Logística e armazenagem', contacto: 'Paulo Rodrigues',
     email: 'prodrigues@logicor.pt', telefone: '+351 21 100 2000',
     morada: 'Av. Logística 1, Setúbal', obras: ['O142'],
@@ -91,6 +93,7 @@ export const CLIENTES_DATA = withDemoSeed([
   },
   {
     id: 'c002', nome: 'Grupo LIDL Portugal', nif: '509 888 002',
+    classificacaoMercado: 'Nacional',
     categoria: 'Retalho alimentar', contacto: 'Sara Moreira',
     email: 'smoreira@lidl.pt', telefone: '+351 21 200 3000',
     morada: 'Rua do Comércio 45, Lisboa', obras: ['O142'],
@@ -101,6 +104,7 @@ export const CLIENTES_DATA = withDemoSeed([
   },
   {
     id: 'c003', nome: 'Câmara Municipal Setúbal', nif: '510 777 003',
+    classificacaoMercado: 'Nacional',
     categoria: 'Administração pública', contacto: 'Dr. Henrique Lopes',
     email: 'hlopes@cm-setubal.pt', telefone: '+351 265 100 000',
     morada: 'Praça do Bocage, Setúbal', obras: ['O143'],
@@ -111,6 +115,7 @@ export const CLIENTES_DATA = withDemoSeed([
   },
   {
     id: 'c004', nome: 'Construtora LD Lda', nif: '511 666 004',
+    classificacaoMercado: 'Nacional',
     categoria: 'Construção civil', contacto: 'Luís Duarte',
     email: 'lduarte@construtorald.pt', telefone: '+351 21 300 4000',
     morada: 'Zona Industrial, Almada', obras: ['O145'],
@@ -121,6 +126,7 @@ export const CLIENTES_DATA = withDemoSeed([
   },
   {
     id: 'c005', nome: 'Promotor ABC Lda', nif: '512 555 005',
+    classificacaoMercado: 'Nacional',
     categoria: 'Promoção imobiliária', contacto: 'Ana Bettencourt',
     email: 'abettencourt@abc.pt', telefone: '+351 21 400 5000',
     morada: 'Rua Nova 12, Lisboa', obras: ['O138'],
@@ -134,6 +140,7 @@ export const CLIENTES_DATA = withDemoSeed([
 ]);
 
 const CATEGORIAS_CLI = ['Todas','Logística e armazenagem','Retalho alimentar','Administração pública','Construção civil','Promoção imobiliária','Indústria','Outro'];
+const MERCADOS_ENTIDADE = ['Nacional', 'União Europeia (UE)', 'Outros mercados'];
 const OBRAS_BASE_LISTA = ['O138','O142','O143','O145'];
 
 const normalizeObraId = (value) => String(value || '').trim().toUpperCase();
@@ -168,6 +175,7 @@ function mergeClientesData(extras = []) {
     const faturas = loadFaturas(merged.id, merged.faturas || []);
     return {
       ...merged,
+      classificacaoMercado: merged.classificacaoMercado || 'Nacional',
       obras: uniqueObras([...(clienteBase.obras || []), ...(extra?.obras || []), ...obrasPorNome, ...faturas.map((fatura) => fatura?.obra)]),
     };
   };
@@ -590,7 +598,7 @@ export function FaturaDetalheModal({ fatura: faturaInicial, cliente, onClose, on
     }}>
       <div style={{
         background: 'var(--bg-card)', borderRadius: 'var(--radius-lg)',
-        border: '0.5px solid var(--border)', width: '100%', maxWidth: 720,
+        border: '0.5px solid var(--border)', width: '100%', maxWidth: 1180,
         maxHeight: '90vh', display: 'flex', flexDirection: 'column',
         boxShadow: '0 16px 48px rgba(0,0,0,0.25)', position: 'relative',
       }}>
@@ -1045,7 +1053,6 @@ export function ClienteModal({ c, onClose, onDelete, abrirFaturaId, onManageAcce
       }}>
         <div style={{
           background: 'var(--bg-card)', borderRadius: 'var(--radius-lg)',
-          border: '0.5px solid var(--border)', width: '100%', maxWidth: 720,
           maxHeight: '88vh', display: 'flex', flexDirection: 'column',
           boxShadow: '0 16px 48px rgba(0,0,0,0.2)', position: 'relative',
         }}>
@@ -1062,7 +1069,7 @@ export function ClienteModal({ c, onClose, onDelete, abrirFaturaId, onManageAcce
               <div style={{ width: 44, height: 44, borderRadius: 12, background: 'var(--brand-accent)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, fontWeight: 700, color: '#fff', flexShrink: 0 }}>{c.nome.charAt(0)}</div>
               <div>
                 <div style={{ fontSize: 17, fontWeight: 700 }}>{c.nome}</div>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{c.categoria} · NIF {c.nif}</div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{c.categoria} · {c.classificacaoMercado || 'Nacional'} · NIF {c.nif}</div>
               </div>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -1164,7 +1171,8 @@ export function ClienteModal({ c, onClose, onDelete, abrirFaturaId, onManageAcce
               <div style={{ padding: '20px 22px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px 24px' }}>
                 {[
                   { label: 'Razão social', value: c.nome }, { label: 'NIF', value: c.nif },
-                  { label: 'Sector', value: c.categoria }, { label: 'Contacto', value: c.contacto },
+                  { label: 'Classificação', value: c.classificacaoMercado || 'Nacional' }, { label: 'Sector', value: c.categoria },
+                  { label: 'Contacto', value: c.contacto },
                   { label: 'Email', value: c.email }, { label: 'Telefone', value: c.telefone },
                   { label: 'Morada', value: c.morada }, { label: 'Obras', value: c.obras.join(', ') || '—' },
                 ].map(item => (
@@ -1414,6 +1422,7 @@ function EmitirFaturaModal({ cliente, onClose, onEmitir }) {
 // ─── MODAL NOVO CLIENTE ───────────────────────────────────────────────────────
 const CAMPOS = [
   { key: 'nome', label: 'Razão social', required: true, half: false },
+  { key: 'classificacaoMercado', label: 'Classificação', required: true, half: true, type: 'select-mercado' },
   { key: 'nif', label: 'NIF', required: true, half: true },
   { key: 'categoria', label: 'Sector', required: true, half: true, type: 'select' },
   { key: 'contacto', label: 'Contacto', required: false, half: true },
@@ -1423,12 +1432,13 @@ const CAMPOS = [
 ];
 
 function NovoClienteModal({ onClose, onSave }) {
-  const [form, setForm] = useState({ nome:'', nif:'', categoria:'', contacto:'', email:'', telefone:'', morada:'' });
+  const [form, setForm] = useState({ nome:'', classificacaoMercado:'Nacional', nif:'', categoria:'', contacto:'', email:'', telefone:'', morada:'' });
   const [errors, setErrors] = useState({});
   const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); setErrors(e => ({ ...e, [k]: '' })); };
   const validate = () => {
     const e = {};
     if (!form.nome.trim()) e.nome = 'Campo obrigatório';
+    if (!form.classificacaoMercado) e.classificacaoMercado = 'Selecciona uma classificação';
     if (!form.nif.trim()) e.nif = 'Campo obrigatório';
     else if (!/^\d{9}$/.test(form.nif.replace(/[\s\-]/g, ''))) e.nif = 'NIF inválido';
     if (!form.categoria) e.categoria = 'Selecciona um sector';
@@ -1453,6 +1463,10 @@ function NovoClienteModal({ onClose, onSave }) {
                 <select value={form[c.key]} onChange={e => set(c.key, e.target.value)} style={inp(errors[c.key])}>
                   <option value="">Selecciona...</option>
                   {CATEGORIAS_CLI.filter(x => x !== 'Todas').map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                </select>
+              ) : c.type === 'select-mercado' ? (
+                <select value={form[c.key]} onChange={e => set(c.key, e.target.value)} style={inp(errors[c.key])}>
+                  {MERCADOS_ENTIDADE.map(item => <option key={item} value={item}>{item}</option>)}
                 </select>
               ) : (
                 <input value={form[c.key]} onChange={e => set(c.key, e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSave()} style={inp(errors[c.key])} />
@@ -1633,7 +1647,7 @@ export default function ClientesPage() {
 
   const handleSave = (form) => {
     if (!canEditClientes) return;
-    const novo = { id: 'u_' + Date.now(), nome: form.nome, nif: form.nif, categoria: form.categoria, contacto: form.contacto || '—', email: form.email || '—', telefone: form.telefone || '—', morada: form.morada || '—', obras: [], totalFaturas: 0, totalRecebido: 0, pendente: 0, estado: 'ativo', faturas: [], _userCreated: true };
+    const novo = { id: 'u_' + Date.now(), nome: form.nome, classificacaoMercado: form.classificacaoMercado, nif: form.nif, categoria: form.categoria, contacto: form.contacto || '—', email: form.email || '—', telefone: form.telefone || '—', morada: form.morada || '—', obras: [], totalFaturas: 0, totalRecebido: 0, pendente: 0, estado: 'ativo', faturas: [], _userCreated: true };
     const updated = [...extras, novo];
     setExtras(updated); saveExtras(updated);
     setShowNovo(false);
@@ -1659,7 +1673,7 @@ export default function ClientesPage() {
   const comPendente   = visibleCli.filter(c => c.pendente > 0).length;
 
   return (
-    <div>
+    <div style={PAGE_WIDE_STYLE}>
       {toast && <div style={{ position:'fixed', bottom:24, right:24, zIndex:700, background:'var(--color-success)', color:'#fff', padding:'10px 18px', borderRadius:8, fontSize:13, fontWeight:500, boxShadow:'0 4px 16px rgba(0,0,0,0.15)' }}>{toast}</div>}
       {showNovo && canEditClientes && <NovoClienteModal onClose={() => setShowNovo(false)} onSave={handleSave} />}
       {accessTarget && (
@@ -1763,7 +1777,7 @@ export default function ClientesPage() {
                 onMouseLeave={e => { e.currentTarget.style.borderColor=''; e.currentTarget.style.boxShadow=''; }}>
                 <div style={{ display:'flex', alignItems:'flex-start', gap:10, marginBottom:10 }}>
                   <div style={{ width:40, height:40, borderRadius:10, background:'var(--bg-success)', border:'0.5px solid var(--border)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:15, fontWeight:700, color:'var(--color-success)', flexShrink:0 }}>{c.nome.charAt(0)}</div>
-                  <div style={{ flex:1, minWidth:0 }}><div style={{ fontWeight:600, fontSize:14 }}>{c.nome}</div><div style={{ fontSize:12, color:'var(--text-muted)' }}>{c.categoria}</div></div>
+                  <div style={{ flex:1, minWidth:0 }}><div style={{ fontWeight:600, fontSize:14 }}>{c.nome}</div><div style={{ fontSize:12, color:'var(--text-muted)' }}>{c.categoria} · {c.classificacaoMercado || 'Nacional'}</div></div>
                   <span className={`badge ${est.cls}`} style={{ flexShrink:0 }}>{est.label}</span>
                 </div>
                 <div style={{ display:'flex', gap:12, fontSize:12, color:'var(--text-muted)', marginBottom:10, flexWrap:'wrap' }}>
@@ -1803,7 +1817,12 @@ export default function ClientesPage() {
                         {c.nome}
                       </div>
                     </td>
-                    <td style={{ padding:'10px 14px', color:'var(--text-muted)' }}>{c.categoria}</td>
+                    <td style={{ padding:'10px 14px', color:'var(--text-muted)' }}>
+                      <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+                        <span>{c.categoria}</span>
+                        <span style={{ fontSize:12 }}>{c.classificacaoMercado || 'Nacional'}</span>
+                      </div>
+                    </td>
                     <td style={{ padding:'10px 14px', color:'var(--text-muted)', fontFamily:'var(--font-mono)', fontSize:12 }}>{c.nif}</td>
                     <td style={{ padding:'10px 14px' }}>{c.obras.map(o => <span key={o} className="badge badge-n" style={{ marginRight:4 }}>{o}</span>)}</td>
                     <td style={{ padding:'10px 14px', textAlign:'center' }}>{c.totalFaturas}</td>
